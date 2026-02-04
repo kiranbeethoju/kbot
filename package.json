@@ -1,0 +1,110 @@
+{
+  "name": "prime-devbot",
+  "displayName": "Prime DevBot",
+  "description": "Cursor-like AI coding assistant powered by Azure OpenAI. 100% local - no telemetry, no cloud storage. Your code never leaves your machine except for Azure GPT calls.",
+  "version": "1.1.6",
+  "publisher": "kiranbeethoju",
+  "author": "Kiran Beethoju",
+  "license": "MIT",
+  "icon": "logo.png",
+  "type": "commonjs",
+  "engines": {
+    "vscode": "^1.75.0"
+  },
+  "categories": [
+    "Machine Learning",
+    "Other"
+  ],
+  "keywords": [
+    "azure",
+    "openai",
+    "gpt",
+    "ai",
+    "assistant",
+    "chat",
+    "coding"
+  ],
+  "activationEvents": [
+    "onCommand:localAzureGPT.openChat"
+  ],
+  "main": "./out/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "localAzureGPT.openChat",
+        "title": "Open Prime DevBot Chat",
+        "category": "Prime DevBot"
+      },
+      {
+        "command": "localAzureGPT.configureCredentials",
+        "title": "Configure Prime DevBot Credentials",
+        "category": "Prime DevBot"
+      },
+      {
+        "command": "localAzureGPT.showLogs",
+        "title": "Show Prime DevBot Logs",
+        "category": "Prime DevBot"
+      },
+      {
+        "command": "localAzureGPT.manageExclusions",
+        "title": "Manage File Exclusions",
+        "category": "Prime DevBot"
+      },
+      {
+        "command": "localAzureGPT.configureSystemPrompts",
+        "title": "Configure System Prompts",
+        "category": "Prime DevBot"
+      }
+    ],
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "prime-devbot-sidebar",
+          "title": "Prime DevBot",
+          "icon": "logo.png"
+        }
+      ]
+    },
+    "views": {
+      "prime-devbot-sidebar": [
+        {
+          "type": "webview",
+          "id": "azureGPTChatView",
+          "name": "Chat",
+          "contextualTitle": "Prime DevBot Chat"
+        },
+        {
+          "type": "webview",
+          "id": "azureGPTCredentialsView",
+          "name": "Credentials",
+          "contextualTitle": "Prime DevBot Credentials"
+        },
+        {
+          "type": "webview",
+          "id": "azureGPTHistoryView",
+          "name": "History",
+          "contextualTitle": "Prime DevBot Chat History"
+        }
+      ]
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run compile",
+    "compile": "esbuild src/extension.ts --bundle --outfile=out/extension.js --external:vscode --format=cjs --platform=node",
+    "watch": "esbuild src/extension.ts --bundle --outfile=out/extension.js --external:vscode --format=cjs --platform=node --watch",
+    "package": "vsce package"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/kiranbeethoju/local-azure-gpt"
+  },
+  "bugs": {
+    "url": "https://github.com/kiranbeethoju/local-azure-gpt/issues"
+  },
+  "homepage": "https://github.com/kiranbeethoju/local-azure-gpt#readme",
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "@types/vscode": "^1.75.0",
+    "esbuild": "^0.20.0"
+  }
+}

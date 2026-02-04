@@ -1,0 +1,2230 @@
+/**
+ * Chat Panel Provider
+ * Main UI for the Azure GPT chat interface
+ */
+
+import * as vscode from 'vscode';
+import { CredentialManager } from './credentials';
+import { AzureGPTService } from './azureGPT';
+import { NvidiaService } from './nvidiaService';
+import { FileManager } from './fileManager';
+import { BackupManager } from './backupManager';
+import { ExclusionManager } from './exclusionManager';
+import { GitManager, GitChange } from './gitManager';
+import { ChatHistoryManager, ChatSession } from './chatHistory';
+import { TerminalManager } from './terminalManager';
+import { ChatMessage, ProviderType } from './types';
+import { Logger } from './logger';
+
+export interface ChatMessageEntry {
+    id: string;
+    role: 'user' | 'assistant' | 'system';
+    content: string;
+    timestamp: number;
+    files?: Array<{ path: string; action: string; content: string; originalContent?: string }>;
+    gitCommitted?: boolean;
+}
+
+export class ChatPanelProvider implements vscode.WebviewViewProvider {
+    private view?: vscode.WebviewView;
+    private gitManager?: GitManager;
+    private chatHistoryManager: ChatHistoryManager;
+    private terminalManager: TerminalManager;
+    private currentSession: ChatSession | null = null;
+    private abortController: AbortController | null = null;
+
+    constructor(
+        private extensionUri: vscode.Uri,
+        private credentialManager: CredentialManager,
+        private azureGPTService: AzureGPTService,
+        private nvidiaService: NvidiaService,
+        private fileManager: FileManager,
+        private backupManager: BackupManager,
+        private exclusionManager: ExclusionManager,
+        private context: vscode.ExtensionContext,
+        terminalManager: TerminalManager,
+        chatHistoryManager: ChatHistoryManager
+    ) {
+        this.chatHistoryManager = chatHistoryManager;
+        this.terminalManager = terminalManager;
+    }
+
+    /**
+     * Initialize git manager
+     */
+    private async ensureGitManager(): Promise<void> {
+        if (!this.gitManager) {
+            try {
+                this.gitManager = new GitManager();
+                await this.gitManager.ensureGitInitialized();
+            } catch (error) {
+                Logger.warn('Git manager not available:', error);
+            }
+        }
+    }
+
+    /**
+     * Initialize chat session
+     */
+    private async initializeSession(): Promise<void> {
+        const activeSession = await this.chatHistoryManager.getActiveSession();
+        if (activeSession) {
+            this.currentSession = activeSession;
+        } else {
+            this.currentSession = await this.chatHistoryManager.createSession();
+        }
+    }
+
+    /**
+     * Resolve webview view
+     */
+    public async resolveWebviewView(
+        webviewView: vscode.WebviewView,
+        context: vscode.WebviewViewResolveContext,
+        _token: vscode.CancellationToken
+    ): Promise<void> {
+        this.view = webviewView;
+
+        webviewView.webview.options = {
+            enableScripts: true,
+            localResourceRoots: [this.extensionUri]
+        };
+
+        webviewView.webview.html = this.getHtmlForWebview(webviewView.webview);
+
+        // Handle messages from webview
+        webviewView.webview.onDidReceiveMessage(async (data) => {
+            Logger.log(`Received message from webview: ${data.type}`, data);
+            try {
+                switch (data.type) {
+                    case 'ping':
+                        Logger.log('Ping received from webview, responding with pong');
+                        this.sendMessage({ type: 'pong', timestamp: data.timestamp });
+                        break;
+                    case 'sendMessage':
+                        Logger.log(`Processing sendMessage: ${data.message?.substring(0, 50)}`);
+                        await this.handleSendMessage(data.message, data.context, data.image);
+                        break;
+                    case 'clearHistory':
+                        await this.clearHistory();
+                        break;
+                    case 'exportHistory':
+                        await this.exportHistory();
+                        break;
+                    case 'applyChanges':
+                        await this.applyChanges(data.files);
+                        break;
+                    case 'applySingleChange':
+                        await this.applySingleChange(data.file, data.userMessage);
+                        break;
+                    case 'openFile':
+                        await this.openFile(data.path);
+                        break;
+                    case 'configureCredentials':
+                        await this.credentialManager.configureCredentials();
+                        this.sendMessage({
+                            type: 'credentialsConfigured'
+                        });
+                        break;
+                    case 'configureExclusions':
+                        await this.exclusionManager.showConfigurationUI();
+                        break;
+                    case 'newChat':
+                        await this.createNewChat();
+                        break;
+                    case 'switchSession':
+                        await this.switchSession(data.sessionId);
+                        break;
+                    case 'deleteSession':
+                        await this.deleteSession(data.sessionId);
+                        break;
+                    case 'loadSessions':
+                        await this.loadSessions();
+                        break;
+                    case 'updateSessionTitle':
+                        await this.updateSessionTitle(data.sessionId, data.title);
+                        break;
+                    case 'executeTerminalCommand':
+                        await this.executeTerminalCommand(data.command);
+                        break;
+                    case 'killProcessOnPort':
+                        await this.killProcessOnPort(data.port);
+                        break;
+                    case 'killProcessByName':
+                        await this.killProcessByName(data.name);
+                        break;
+                    case 'checkPortInUse':
+                        await this.checkPortInUse(data.port);
+                        break;
+                    case 'stopRequest':
+                        // Abort the current API request
+                        if (this.abortController) {
+                            this.abortController.abort();
+                            this.abortController = null;
+                            this.sendMessage({
+                                type: 'requestStopped'
+                            });
+                        }
+                        break;
+                }
+            } catch (error: any) {
+                Logger.log('Error handling webview message:', error);
+                this.sendMessage({
+                    type: 'error',
+                    message: `Internal Error: ${error.message}`
+                });
+            }
+        });
+
+        // Initialize and load chat session
+        await this.initializeSession();
+        await this.loadSessions();
+
+        // Handle visibility changes to maintain chat state
+        webviewView.onDidChangeVisibility(async () => {
+            if (webviewView.visible) {
+                // Reload session and messages when becoming visible
+                await this.initializeSession();
+                await this.loadSessions();
+                await this.loadChatMessages();
+            }
+        });
+    }
+
+    private messagesLoaded = false;
+
+    /**
+     * Load chat messages from current session
+     */
+    private async loadChatMessages(): Promise<void> {
+        if (!this.currentSession || this.currentSession.messages.length === 0 || this.messagesLoaded) {
+            return;
+        }
+
+        // Clear existing messages first to prevent duplicates
+        this.sendMessage({ type: 'clearChat' });
+
+        // Send all existing messages to restore the chat
+        for (const message of this.currentSession.messages) {
+            this.sendMessage({
+                type: 'messageAdded',
+                message
+            });
+        }
+        
+        this.messagesLoaded = true;
+    }
+
+    /**
+     * Handle sending a message
+     */
+    private async handleSendMessage(
+        userMessage: string,
+        context: any,
+        image?: { data: string; mimeType: string; name: string }
+    ): Promise<void> {
+        Logger.log(`handleSendMessage called with message: ${userMessage.substring(0, 50)}...`);
+
+        // Ensure git is initialized
+        await this.ensureGitManager();
+
+        // Get the selected provider
+        const provider = await this.credentialManager.getSelectedProvider();
+
+        // Check if credentials are configured
+        const isConfigured = await this.credentialManager.isConfigured();
+
+        if (!isConfigured) {
+            const providerName = provider === ProviderType.Azure ? 'Azure' : 'NVIDIA';
+            this.sendMessage({
+                type: 'error',
+                message: `${providerName} credentials not configured. Please configure them first.`
+            });
+            return;
+        }
+
+        // Add user message to history
+        const userEntry: ChatMessageEntry = {
+            id: this.generateId(),
+            role: 'user',
+            content: userMessage,
+            timestamp: Date.now()
+        };
+
+        if (this.currentSession) {
+            this.currentSession.messages.push(userEntry);
+            await this.chatHistoryManager.addMessage(userEntry);
+        }
+
+        this.sendMessage({
+            type: 'messageAdded',
+            message: userEntry
+        });
+
+        // Show loading indicator
+        this.sendMessage({
+            type: 'loadingStarted',
+            message: `Thinking with ${provider === ProviderType.Azure ? 'Azure' : 'NVIDIA'}...`
+        });
+
+        try {
+            // Create abort controller for this request
+            this.abortController = new AbortController();
+
+            // Send progress update
+            this.sendMessage({
+                type: 'loadingUpdate',
+                message: 'Collecting workspace files...'
+            });
+
+            // Collect file context - ALWAYS include workspace files automatically
+            let fileContexts: any[] = [];
+
+            // 1. Always include current file if available
+            if (context.includeCurrentFile) {
+                const currentFile = await this.fileManager.getCurrentFile();
+                if (currentFile) {
+                    fileContexts.push(currentFile);
+                }
+            }
+
+            // 2. Always include ALL workspace files automatically (this is the key change)
+            // Get all relevant files from current working directory
+            let workspaceFiles: any[] = [];
+            try {
+                workspaceFiles = await this.fileManager.getWorkspaceFiles();
+                
+                // Log workspace file count for debugging
+                if (workspaceFiles.length > 0) {
+                    Logger.log(`Auto-including ${workspaceFiles.length} workspace files from ${this.fileManager.getWorkspaceRoot()}`);
+
+                    // Send progress update
+                    this.sendMessage({
+                        type: 'loadingUpdate',
+                        message: `Found ${workspaceFiles.length} workspace files...`
+                    });
+
+                    fileContexts.push(...workspaceFiles);
+                } else {
+                    Logger.log(`No workspace files found in ${this.fileManager.getWorkspaceRoot()}, will continue with current file only`);
+                }
+            } catch (error: any) {
+                Logger.warn('Failed to collect workspace files, continuing with current file only:', error);
+                // Don't show error to user, just continue without workspace files
+                this.sendMessage({
+                    type: 'loadingUpdate',
+                    message: 'Continuing with current file only...'
+                });
+            }
+
+            // 3. Additional selected files if any
+            if (context.selectedFiles && context.selectedFiles.length > 0) {
+                const selected = await this.fileManager.getSelectedFiles(
+                    context.selectedFiles.map((f: any) => vscode.Uri.parse(f))
+                );
+                fileContexts.push(...selected);
+            }
+
+            // 4. Add git diff if requested
+            let gitDiffContent = '';
+            if (context.includeGitDiff) {
+                const gitDiff = await this.fileManager.getGitDiff();
+                if (gitDiff) {
+                    gitDiffContent = `\n\n--- GIT DIFF ---\n${gitDiff}\n--- END GIT DIFF ---\n`;
+                }
+            }
+
+            // 5. Add terminal output if requested
+            let terminalContent = '';
+            if (context.includeTerminal) {
+                terminalContent = '\n\n[Terminal output would be included here]';
+            }
+
+            // Build messages array
+            const systemPrompt = provider === ProviderType.Azure
+                ? await this.azureGPTService.generateSystemPrompt({
+                    fileCount: fileContexts.length,
+                    includeGitDiff: context.includeGitDiff || false,
+                    includeTerminal: context.includeTerminal || false
+                })
+                : await this.nvidiaService.generateSystemPrompt({
+                    fileCount: fileContexts.length,
+                    includeGitDiff: context.includeGitDiff || false,
+                    includeTerminal: context.includeTerminal || false
+                });
+
+            const messages: ChatMessage[] = [
+                {
+                    role: 'system',
+                    content: systemPrompt
+                },
+                {
+                    role: 'user',
+                    content: `${userMessage}
+
+=== WORKSPACE CONTEXT ===
+Working Directory: ${this.fileManager.getWorkspaceRoot()}
+Files Included: ${fileContexts.length} files
+${this.fileManager.formatFilesForContext(fileContexts)}
+${gitDiffContent}${terminalContent}
+=======================`,
+                    ...(image && {
+                        image: {
+                            data: image.data,
+                            mimeType: image.mimeType
+                        }
+                    })
+                }
+            ];
+
+            // Add conversation history from current session
+            const historyMessages = this.currentSession?.messages || [];
+            for (const entry of historyMessages.slice(-10)) {
+                if (entry.role !== 'system') {
+                    messages.push({
+                        role: entry.role,
+                        content: entry.content
+                    });
+                }
+            }
+
+            // Calculate input tokens (rough estimation: 1 token ≈ 4 characters)
+            let totalInputChars = 0;
+            for (const msg of messages) {
+                totalInputChars += msg.content.length;
+                if (msg.image) {
+                    // Images add significant tokens - roughly estimate based on size
+                    // A typical 512x512 image is ~1100 tokens in GPT-4 Vision
+                    totalInputChars += 4400; // ~1100 tokens * 4
+                }
+            }
+            const estimatedInputTokens = Math.ceil(totalInputChars / 4);
+
+            // Get context window size (default to 128K for GPT-4)
+            let contextWindow = 128000;
+            if (provider === ProviderType.Azure) {
+                const azureCreds = await this.credentialManager.getAzureCredentials();
+                if (azureCreds?.modelName) {
+                    // Adjust context window based on model
+                    if (azureCreds.modelName.includes('gpt-4')) {
+                        contextWindow = 128000;
+                    } else if (azureCreds.modelName.includes('gpt-3.5')) {
+                        contextWindow = 16000;
+                    }
+                }
+            }
+
+            // Send token update to frontend
+            this.sendMessage({
+                type: 'tokenUpdate',
+                inputTokens: estimatedInputTokens,
+                contextWindow: contextWindow
+            });
+
+            // Call the appropriate service based on provider
+            let response: string;
+
+            // Send progress update
+            this.sendMessage({
+                type: 'loadingUpdate',
+                message: `Sending request to ${provider === ProviderType.Azure ? 'Azure OpenAI' : 'NVIDIA'}...`
+            });
+
+            if (provider === ProviderType.Azure) {
+                // Set credentials for Azure service
+                const azureCreds = await this.credentialManager.getAzureCredentials();
+                if (!azureCreds) {
+                    throw new Error('Azure credentials not found');
+                }
+                response = await this.azureGPTService.chatCompletion(
+                    messages,
+                    (delta) => {
+                        this.sendMessage({
+                            type: 'messageDelta',
+                            delta
+                        });
+                    },
+                    this.abortController.signal
+                );
+            } else {
+                // Set credentials for NVIDIA service
+                const nvidiaCreds = await this.credentialManager.getNvidiaCredentials();
+                if (!nvidiaCreds) {
+                    throw new Error('NVIDIA credentials not found');
+                }
+                this.nvidiaService.setCredentials(nvidiaCreds);
+                response = await this.nvidiaService.chatCompletion(
+                    messages,
+                    (delta) => {
+                        this.sendMessage({
+                            type: 'messageDelta',
+                            delta
+                        });
+                    },
+                    this.abortController.signal
+                );
+            }
+
+            // Hide loading indicator
+            this.sendMessage({
+                type: 'loadingStopped'
+            });
+
+            // Signal streaming complete
+            this.sendMessage({
+                type: 'streamingComplete'
+            });
+
+            // Parse response
+            const structuredResponse = this.azureGPTService.parseStructuredResponse(response);
+
+            // Enrich file changes with git status
+            if (structuredResponse.files && structuredResponse.files.length > 0) {
+                for (const file of structuredResponse.files) {
+                    if (this.gitManager) {
+                        const originalContent = await this.gitManager.getOriginalContent(file.path);
+                        (file as any).originalContent = originalContent || undefined;
+                    }
+                }
+            }
+
+            // Signal streaming complete (this finalizes the accumulated message)
+            this.sendMessage({
+                type: 'streamingComplete'
+            });
+
+            // Add assistant message to history (but don't send to UI again)
+            const assistantEntry: ChatMessageEntry = {
+                id: this.generateId(),
+                role: 'assistant',
+                content: structuredResponse.explanation,
+                timestamp: Date.now(),
+                files: structuredResponse.files
+            };
+
+            if (this.currentSession) {
+                this.currentSession.messages.push(assistantEntry);
+                await this.chatHistoryManager.addMessage(assistantEntry);
+            }
+
+            // Auto-commit changes if git is enabled
+            if (this.gitManager && structuredResponse.files && structuredResponse.files.length > 0) {
+                // Commit will happen after user applies changes
+                Logger.log(`Prepared ${structuredResponse.files.length} file changes for git commit after user approval`);
+            }
+
+            // Clean up abort controller
+            this.abortController = null;
+        } catch (error: any) {
+            // Clean up abort controller
+            this.abortController = null;
+
+            // Check if error is due to abort
+            if (error.name === 'AbortError') {
+                // Request was cancelled by user, already handled
+                return;
+            }
+
+            this.sendMessage({
+                type: 'loadingStopped'
+            });
+            this.sendMessage({
+                type: 'error',
+                message: error.message || `Failed to get response from ${provider === ProviderType.Azure ? 'Azure GPT' : 'NVIDIA'}`
+            });
+        }
+    }
+
+    /**
+     * Apply file changes
+     */
+    private async applyChanges(
+        files: Array<{ path: string; action: string; content: string }>
+    ): Promise<void> {
+        try {
+            // Create backups
+            const filesToBackup = files
+                .filter((f) => f.action === 'update')
+                .map((f) => f.path);
+
+            await this.backupManager.backupFiles(filesToBackup);
+
+            // Apply changes
+            await this.fileManager.applyFileChanges(files);
+
+            vscode.window.showInformationMessage(
+                `Successfully applied changes to ${files.length} file(s)`
+            );
+
+            this.sendMessage({
+                type: 'changesApplied',
+                files
+            });
+
+            // Commit to git
+            if (this.gitManager) {
+                const gitChanges: GitChange[] = files.map(f => ({
+                    path: f.path,
+                    action: f.action as 'update' | 'create' | 'delete',
+                    content: f.content
+                }));
+
+                // Find the user message that prompted these changes
+                const messages = this.currentSession?.messages || [];
+                const lastUserMessage = [...messages].reverse().find(m => m.role === 'user');
+                await this.gitManager.commitAIChanges(gitChanges, lastUserMessage?.content || 'AI changes');
+            }
+        } catch (error: any) {
+            vscode.window.showErrorMessage(`Failed to apply changes: ${error.message}`);
+        }
+    }
+
+    /**
+     * Apply single file change
+     */
+    private async applySingleChange(
+        file: { path: string; action: string; content: string },
+        userMessage: string
+    ): Promise<void> {
+        try {
+            // Create backup if updating
+            if (file.action === 'update') {
+                await this.backupManager.backupFiles([file.path]);
+            }
+
+            // Apply change
+            await this.fileManager.applyFileChanges([file]);
+
+            // Commit to git
+            if (this.gitManager) {
+                const gitChange: GitChange = {
+                    path: file.path,
+                    action: file.action as 'update' | 'create' | 'delete',
+                    content: file.content
+                };
+                await this.gitManager.commitAIChanges([gitChange], userMessage);
+            }
+
+            vscode.window.showInformationMessage(`Applied change to ${file.path}`);
+        } catch (error: any) {
+            vscode.window.showErrorMessage(`Failed to apply change to ${file.path}: ${error.message}`);
+        }
+    }
+
+    /**
+     * Open a file in the editor
+     */
+    private async openFile(filePath: string): Promise<void> {
+        const workspaceFolders = vscode.workspace.workspaceFolders;
+
+        if (!workspaceFolders) {
+            return;
+        }
+
+        const fullPath = `${workspaceFolders[0].uri.fsPath}/${filePath}`;
+        const uri = vscode.Uri.file(fullPath);
+
+        await vscode.window.showTextDocument(uri);
+    }
+
+    /**
+     * Clear chat history
+     */
+    async clearHistory(): Promise<void> {
+        if (this.currentSession) {
+            this.currentSession.messages = [];
+            await this.chatHistoryManager.updateSession(this.currentSession.id, []);
+            this.messagesLoaded = false; // Reset the flag
+            this.sendMessage({ type: 'historyCleared' });
+        }
+    }
+
+    /**
+     * Export chat history
+     */
+    async exportHistory(): Promise<void> {
+        const workspaceFolders = vscode.workspace.workspaceFolders;
+
+        if (!workspaceFolders) {
+            vscode.window.showErrorMessage('No workspace folder open');
+            return;
+        }
+
+        const exportPath = `${workspaceFolders[0].uri.fsPath}/azure-gpt-chat-export-${Date.now()}.json`;
+        const uri = vscode.Uri.file(exportPath);
+
+        const encoder = new TextEncoder();
+        const messages = this.currentSession?.messages || [];
+        const content = encoder.encode(JSON.stringify(messages, null, 2));
+
+        await vscode.workspace.fs.writeFile(uri, content);
+
+        vscode.window.showInformationMessage(`Chat history exported to ${exportPath}`);
+    }
+
+    /**
+     * Load chat history from storage
+     */
+    private async loadChatHistory(): Promise<void> {
+        if (!this.currentSession) {
+            await this.initializeSession();
+        }
+
+        if (this.currentSession) {
+            this.sendMessage({
+                type: 'sessionLoaded',
+                session: this.currentSession
+            });
+        }
+    }
+
+    /**
+     * Save chat history to storage
+     */
+    private async saveChatHistory(): Promise<void> {
+        if (this.currentSession) {
+            await this.chatHistoryManager.updateSession(
+                this.currentSession.id,
+                this.currentSession.messages
+            );
+        }
+    }
+
+    /**
+     * Create a new chat
+     */
+    private async createNewChat(): Promise<void> {
+        const newSession = await this.chatHistoryManager.createSession();
+        this.currentSession = newSession;
+        this.messagesLoaded = false; // Reset the flag
+        this.sendMessage({ type: 'sessionChanged', session: newSession });
+        Logger.log(`Created new chat session: ${newSession.id}`);
+    }
+
+    /**
+     * Switch to a different session
+     */
+    private async switchSession(sessionId: string): Promise<void> {
+        await this.chatHistoryManager.setActiveSession(sessionId);
+        const session = await this.chatHistoryManager.getSession(sessionId);
+        
+        if (session) {
+            this.currentSession = session;
+            this.messagesLoaded = false; // Reset the flag
+            this.sendMessage({ type: 'sessionChanged', session });
+            Logger.log(`Switched to chat session: ${sessionId}`);
+        }
+    }
+
+    /**
+     * Delete a session
+     */
+    private async deleteSession(sessionId: string): Promise<void> {
+        await this.chatHistoryManager.deleteSession(sessionId);
+
+        // Reload current session
+        await this.initializeSession();
+        if (this.currentSession) {
+            this.sendMessage({
+                type: 'sessionChanged',
+                session: this.currentSession
+            });
+        }
+
+        Logger.log(`Deleted session: ${sessionId}`);
+    }
+
+    /**
+     * Load all sessions for the sidebar
+     */
+    private async loadSessions(): Promise<void> {
+        const sessions = await this.chatHistoryManager.getAllSessions();
+        const activeSessionId = await this.chatHistoryManager.getActiveSessionId();
+
+        this.sendMessage({
+            type: 'sessionsList',
+            sessions: sessions,
+            activeSessionId: activeSessionId
+        });
+    }
+
+    /**
+     * Update session title
+     */
+    private async updateSessionTitle(sessionId: string, title: string): Promise<void> {
+        await this.chatHistoryManager.updateSessionTitle(sessionId, title);
+        await this.loadSessions();
+    }
+
+    /**
+     * Execute terminal command
+     */
+    private async executeTerminalCommand(command: string): Promise<void> {
+        try {
+            const cmd = await this.terminalManager.executeCommand(command);
+            this.sendMessage({
+                type: 'terminalCommandExecuted',
+                command: cmd
+            });
+        } catch (error: any) {
+            this.sendMessage({
+                type: 'error',
+                message: `Failed to execute command: ${error.message}`
+            });
+        }
+    }
+
+    /**
+     * Kill process on port
+     */
+    private async killProcessOnPort(port: number): Promise<void> {
+        try {
+            const success = await this.terminalManager.killProcessOnPort(port);
+            if (success) {
+                this.sendMessage({
+                    type: 'info',
+                    message: `Successfully killed process on port ${port}`
+                });
+            } else {
+                this.sendMessage({
+                    type: 'error',
+                    message: `No process found on port ${port}`
+                });
+            }
+        } catch (error: any) {
+            this.sendMessage({
+                type: 'error',
+                message: `Failed to kill process: ${error.message}`
+            });
+        }
+    }
+
+    /**
+     * Kill process by name
+     */
+    private async killProcessByName(name: string): Promise<void> {
+        try {
+            const success = await this.terminalManager.killProcessByName(name);
+            if (success) {
+                this.sendMessage({
+                    type: 'info',
+                    message: `Successfully killed process: ${name}`
+                });
+            } else {
+                this.sendMessage({
+                    type: 'error',
+                    message: `No process found with name: ${name}`
+                });
+            }
+        } catch (error: any) {
+            this.sendMessage({
+                type: 'error',
+                message: `Failed to kill process: ${error.message}`
+            });
+        }
+    }
+
+    /**
+     * Check if port is in use
+     */
+    private async checkPortInUse(port: number): Promise<void> {
+        try {
+            const inUse = await this.terminalManager.isPortInUse(port);
+            this.sendMessage({
+                type: 'portCheckResult',
+                port: port,
+                inUse: inUse
+            });
+        } catch (error: any) {
+            this.sendMessage({
+                type: 'error',
+                message: `Failed to check port: ${error.message}`
+            });
+        }
+    }
+
+    /**
+     * Send message to webview
+     */
+    private sendMessage(message: any): void {
+        if (this.view) {
+            this.view.webview.postMessage(message);
+        }
+    }
+
+    /**
+     * Generate unique ID
+     */
+    private generateId(): string {
+        return `${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
+    }
+
+    /**
+     * Get HTML for webview
+     */
+    private getHtmlForWebview(webview: vscode.Webview): string {
+        return `<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Azure GPT Chat</title>
+    <style>
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+        }
+
+        body {
+            font-family: var(--vscode-font-family);
+            font-size: var(--vscode-font-size);
+            color: var(--vscode-foreground);
+            background-color: var(--vscode-editor-background);
+            padding: 16px;
+            height: 100vh;
+            display: flex;
+            flex-direction: column;
+        }
+
+        .header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 16px;
+            padding-bottom: 12px;
+            border-bottom: 1px solid var(--vscode-panel-border);
+        }
+
+        .header h1 {
+            font-size: 16px;
+            font-weight: 600;
+            color: var(--vscode-foreground);
+        }
+
+        .header-actions {
+            display: flex;
+            gap: 8px;
+        }
+
+        .header-actions button {
+            background: var(--vscode-button-secondaryBackground);
+            color: var(--vscode-button-secondaryForeground);
+            border: none;
+            padding: 6px 12px;
+            border-radius: 3px;
+            cursor: pointer;
+            font-size: 12px;
+        }
+
+        .header-actions button:hover {
+            background: var(--vscode-button-secondaryHoverBackground);
+        }
+
+        .chat-container {
+            flex: 1;
+            overflow-y: auto;
+            display: flex;
+            flex-direction: column;
+            gap: 12px;
+            margin-bottom: 16px;
+        }
+
+        .message {
+            padding: 12px;
+            border-radius: 8px;
+            max-width: 85%;
+            word-wrap: break-word;
+        }
+
+        .message.user {
+            align-self: flex-end;
+            background-color: var(--vscode-button-background);
+            color: var(--vscode-button-foreground);
+        }
+
+        .message.assistant {
+            align-self: flex-start;
+            background-color: var(--vscode-editor-inactiveSelectionBackground);
+            color: var(--vscode-foreground);
+        }
+
+        .message.system {
+            align-self: center;
+            background-color: var(--vscode-editorInfo-background);
+            color: var(--vscode-editorInfo-foreground);
+            font-size: 12px;
+            max-width: 100%;
+        }
+
+        .message-content {
+            white-space: pre-wrap;
+        }
+
+        .message-content pre {
+            background-color: var(--vscode-textCodeBlock-background);
+            padding: 8px;
+            border-radius: 4px;
+            overflow-x: auto;
+            margin: 8px 0;
+        }
+
+        .message-content code {
+            font-family: var(--vscode-editor-font-family);
+            font-size: var(--vscode-editor-font-size);
+        }
+
+        .file-changes {
+            margin-top: 12px;
+            padding: 12px;
+            background-color: var(--vscode-editor-inactiveSelectionBackground);
+            border-radius: 4px;
+        }
+
+        .file-changes h3 {
+            font-size: 14px;
+            margin-bottom: 12px;
+        }
+
+        .file-changes-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 12px;
+        }
+
+        .accept-all-button {
+            background: var(--vscode-button-background);
+            color: var(--vscode-button-foreground);
+            border: none;
+            padding: 6px 12px;
+            border-radius: 3px;
+            cursor: pointer;
+            font-size: 12px;
+        }
+
+        .accept-all-button:hover {
+            background: var(--vscode-button-hoverBackground);
+        }
+
+        .file-change {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 10px;
+            background-color: var(--vscode-editor-background);
+            margin: 6px 0;
+            border-radius: 4px;
+            border-left: 3px solid transparent;
+        }
+
+        .file-change.create {
+            border-left-color: #4ec9b0;
+        }
+
+        .file-change.update {
+            border-left-color: #dcdcaa;
+        }
+
+        .file-change.delete {
+            border-left-color: #f14c4c;
+        }
+
+        .file-change-info {
+            flex: 1;
+        }
+
+        .file-change-path {
+            font-size: 13px;
+            font-weight: 500;
+        }
+
+        .file-change-badge {
+            display: inline-block;
+            font-size: 10px;
+            padding: 2px 6px;
+            border-radius: 3px;
+            margin-left: 8px;
+            text-transform: uppercase;
+            font-weight: 600;
+        }
+
+        .file-change-badge.create {
+            background-color: #4ec9b0;
+            color: #000;
+        }
+
+        .file-change-badge.update {
+            background-color: #dcdcaa;
+            color: #000;
+        }
+
+        .file-change-badge.delete {
+            background-color: #f14c4c;
+            color: #fff;
+        }
+
+        .file-change-actions {
+            display: flex;
+            gap: 6px;
+        }
+
+        .file-change-actions button {
+            background: var(--vscode-button-background);
+            color: var(--vscode-button-foreground);
+            border: none;
+            padding: 4px 10px;
+            border-radius: 3px;
+            cursor: pointer;
+            font-size: 11px;
+        }
+
+        .file-change-actions button:hover {
+            background: var(--vscode-button-hoverBackground);
+        }
+
+        .loading-indicator {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            padding: 12px;
+            background-color: var(--vscode-editor-inactiveSelectionBackground);
+            border-radius: 4px;
+            margin-bottom: 12px;
+        }
+
+        .loading-indicator.hidden {
+            display: none;
+        }
+
+        .stop-button {
+            background: var(--vscode-errorBackground);
+            color: var(--vscode-errorForeground);
+            border: none;
+            padding: 6px 16px;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 12px;
+            font-weight: 500;
+            display: none;
+        }
+
+        .stop-button:not(.hidden) {
+            display: block;
+        }
+
+        .stop-button:hover {
+            background: var(--vscode-button-secondaryHoverBackground);
+        }
+
+        .loading-content {
+            display: none;
+            flex: 1;
+            font-size: 13px;
+            line-height: 1.5;
+            color: var(--vscode-foreground);
+            white-space: pre-wrap;
+            word-wrap: break-word;
+            margin-top: 8px;
+        }
+
+        .loading-content:not(.hidden) {
+            display: block;
+        }
+
+        .token-usage {
+            display: none;
+            margin-top: 12px;
+            padding: 12px;
+            background: var(--vscode-editor-background);
+            border: 1px solid var(--vscode-panel-border);
+            border-radius: 4px;
+            font-size: 11px;
+        }
+
+        .token-usage:not(.hidden) {
+            display: block;
+        }
+
+        .token-row {
+            display: flex;
+            justify-content: space-between;
+            margin-bottom: 6px;
+        }
+
+        .token-row:last-child {
+            margin-bottom: 0;
+        }
+
+        .token-label {
+            color: var(--vscode-descriptionForeground);
+            font-weight: 500;
+        }
+
+        .token-value {
+            color: var(--vscode-foreground);
+            font-weight: 600;
+            font-family: var(--vscode-editor-font-family);
+        }
+
+        .token-context-window {
+            margin-top: 8px;
+            padding-top: 8px;
+            border-top: 1px solid var(--vscode-panel-border);
+            color: var(--vscode-descriptionForeground);
+            font-size: 10px;
+            text-align: center;
+        }
+
+        #contextUsage.warning {
+            color: var(--vscode-errorForeground);
+        }
+
+        #contextUsage.high {
+            color: var(--vscode-warningForeground);
+        }
+
+        .loading-indicator {
+            flex-direction: column;
+            align-items: flex-start;
+        }
+
+        .input-container {
+            display: flex;
+            flex-direction: column;
+            gap: 12px;
+        }
+
+        .context-options {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 8px;
+        }
+
+        .context-option {
+            display: flex;
+            align-items: center;
+            gap: 4px;
+            font-size: 12px;
+        }
+
+        .context-option input[type="checkbox"] {
+            cursor: pointer;
+        }
+
+        .context-option {
+            cursor: help;
+            position: relative;
+        }
+
+        .input-row {
+            display: flex;
+            gap: 8px;
+        }
+
+        .input-row textarea {
+            flex: 1;
+            min-height: 60px;
+            max-height: 200px;
+            padding: 8px;
+            background-color: var(--vscode-input-background);
+            color: var(--vscode-input-foreground);
+            border: 1px solid var(--vscode-input-border);
+            border-radius: 4px;
+            resize: vertical;
+            font-family: var(--vscode-font-family);
+        }
+
+        .input-row button {
+            background: var(--vscode-button-background);
+            color: var(--vscode-button-foreground);
+            border: none;
+            padding: 8px 16px;
+            border-radius: 4px;
+            cursor: pointer;
+            font-weight: 500;
+        }
+
+        .input-row button:hover:not(:disabled) {
+            background: var(--vscode-button-hoverBackground);
+        }
+
+        .input-row button:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+        }
+
+        .image-attachment-container {
+            display: flex;
+            gap: 8px;
+            align-items: center;
+            margin-bottom: 8px;
+        }
+
+        .image-upload-button {
+            background: var(--vscode-button-secondaryBackground);
+            color: var(--vscode-button-secondaryForeground);
+            border: 1px solid var(--vscode-button-border);
+            padding: 6px 12px;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 12px;
+            display: flex;
+            align-items: center;
+            gap: 6px;
+        }
+
+        .image-upload-button:hover {
+            background: var(--vscode-button-secondaryHoverBackground);
+        }
+
+        .image-preview {
+            display: none;
+            align-items: center;
+            gap: 8px;
+            padding: 6px;
+            background: var(--vscode-editor-background);
+            border: 1px solid var(--vscode-panel-border);
+            border-radius: 4px;
+        }
+
+        .image-preview:not(.hidden) {
+            display: flex;
+        }
+
+        .image-preview img {
+            max-width: 60px;
+            max-height: 60px;
+            border-radius: 4px;
+            object-fit: cover;
+            display: none;
+        }
+
+        .image-preview:not(.hidden) img {
+            display: block;
+        }
+
+        .image-preview-info {
+            display: flex;
+            flex-direction: column;
+            font-size: 11px;
+        }
+
+        .image-preview-name {
+            color: var(--vscode-foreground);
+            max-width: 200px;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+
+        .image-preview-remove {
+            background: var(--vscode-errorBackground);
+            color: var(--vscode-errorForeground);
+            border: none;
+            padding: 4px 8px;
+            border-radius: 3px;
+            cursor: pointer;
+            font-size: 11px;
+        }
+
+        .image-preview-remove:hover {
+            opacity: 0.8;
+        }
+
+        #imageInput {
+            display: none;
+        }
+
+        .loading {
+            display: inline-block;
+            width: 16px;
+            height: 16px;
+            border: 2px solid var(--vscode-foreground);
+            border-radius: 50%;
+            border-top-color: transparent;
+            animation: spin 1s linear infinite;
+        }
+
+        @keyframes spin {
+            to { transform: rotate(360deg); }
+        }
+
+        .empty-state {
+            text-align: center;
+            padding: 40px 20px;
+            color: var(--vscode-descriptionForeground);
+        }
+
+        .empty-state h2 {
+            font-size: 18px;
+            margin-bottom: 8px;
+        }
+
+        .empty-state p {
+            font-size: 14px;
+        }
+
+        .empty-state button {
+            margin-top: 16px;
+            background: var(--vscode-button-background);
+            color: var(--vscode-button-foreground);
+            border: none;
+            padding: 8px 16px;
+            border-radius: 4px;
+            cursor: pointer;
+        }
+
+        .loading-content::after {
+            content: '▋';
+            display: inline-block;
+            margin-left: 4px;
+            animation: blink 1s infinite;
+        }
+
+        @keyframes blink {
+            0%, 50% { opacity: 1; }
+            51%, 100% { opacity: 0; }
+        }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <h1>Prime DevBot</h1>
+        <div class="header-actions">
+            <button id="newChatBtn">New Chat</button>
+            <button id="clearHistory">Clear History</button>
+            <button id="exportHistory">Export</button>
+            <button id="configureExclusions">Exclusions</button>
+            <button id="configureCredentials">Configure</button>
+        </div>
+    </div>
+
+    <div class="chat-container" id="chatContainer">
+        <div class="empty-state">
+            <h2>Welcome to DevBot Assistant</h2>
+            <p>Ask me anything about your code!</p>
+            <button id="configureNow">Configure Azure Credentials</button>
+        </div>
+    </div>
+
+    <div class="loading-indicator hidden" id="loadingIndicator">
+        <div class="spinner"></div>
+        <span id="loadingMessage">Thinking...</span>
+        <button id="stopButton" class="stop-button hidden">Stop</button>
+        <div id="loadingContent" class="loading-content hidden"></div>
+
+        <!-- Token Usage Display -->
+        <div class="token-usage" id="tokenUsage">
+            <div class="token-row">
+                <span class="token-label">Input Tokens:</span>
+                <span class="token-value" id="inputTokens">0</span>
+            </div>
+            <div class="token-row">
+                <span class="token-label">Output Tokens:</span>
+                <span class="token-value" id="outputTokens">0</span>
+            </div>
+            <div class="token-row">
+                <span class="token-label">Total Tokens:</span>
+                <span class="token-value" id="totalTokens">0</span>
+            </div>
+            <div class="token-row">
+                <span class="token-label">Context Usage:</span>
+                <span class="token-value" id="contextUsage">0%</span>
+            </div>
+            <div class="token-context-window">
+                Context Window: <span id="contextWindow">128K</span>
+            </div>
+        </div>
+    </div>
+
+    <div class="input-container">
+        <div class="context-options">
+            <label class="context-option" title="Include the currently open file in context">
+                <input type="checkbox" id="includeCurrentFile" checked>
+                Active File
+            </label>
+            <label class="context-option" title="Include git diff of recent changes">
+                <input type="checkbox" id="includeGitDiff">
+                Git Diff
+            </label>
+            <label class="context-option" title="Include terminal output">
+                <input type="checkbox" id="includeTerminal">
+                Terminal
+            </label>
+        </div>
+
+        <div class="image-attachment-container">
+            <input type="file" id="imageInput" accept="image/png,image/jpeg,image/gif,image/webp">
+            <button id="imageUploadButton" class="image-upload-button">
+                <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor">
+                    <path d="M8.75 2.75a.75.75 0 00-1.5 0v5.5h-5.5a.75.75 0 000 1.5h5.5v5.5a.75.75 0 001.5 0v-5.5h5.5a.75.75 0 000-1.5h-5.5v-5.5z"/>
+                </svg>
+                Add Image
+            </button>
+            <div id="imagePreview" class="image-preview hidden">
+                <img id="previewImage" alt="Preview">
+                <div class="image-preview-info">
+                    <span id="imageName" class="image-preview-name"></span>
+                </div>
+                <button id="removeImage" class="image-preview-remove">Remove</button>
+            </div>
+        </div>
+
+        <div class="input-row">
+            <textarea id="messageInput" placeholder="Ask me anything about your code..."></textarea>
+            <button id="sendButton">Send</button>
+        </div>
+    </div>
+
+    <script>
+        console.log('Chat panel script loading...');
+        const vscode = acquireVsCodeApi();
+        let isLoading = false;
+        let attachedImage = null; // Store base64 encoded image
+
+        // Wait for DOM to be ready before accessing elements
+        function initializeDOMElements() {
+            console.log('DOM ready state:', document.readyState);
+            console.log('Initializing DOM elements...');
+            
+            // Get all DOM elements
+            const chatContainer = document.getElementById('chatContainer');
+            const messageInput = document.getElementById('messageInput');
+            const sendButton = document.getElementById('sendButton');
+            const newChatBtn = document.getElementById('newChatBtn');
+            const clearHistoryBtn = document.getElementById('clearHistory');
+            const exportHistoryBtn = document.getElementById('exportHistory');
+            const exclusionsBtn = document.getElementById('configureExclusions');
+            const configureBtn = document.getElementById('configureCredentials');
+            const configureNowBtn = document.getElementById('configureNow');
+            const imageInput = document.getElementById('imageInput');
+            const imageUploadButton = document.getElementById('imageUploadButton');
+            const imagePreview = document.getElementById('imagePreview');
+            const previewImage = document.getElementById('previewImage');
+            const imageName = document.getElementById('imageName');
+            const removeImageBtn = document.getElementById('removeImage');
+
+            console.log('DOM elements found:', {
+                chatContainer: !!chatContainer,
+                messageInput: !!messageInput,
+                sendButton: !!sendButton,
+                newChatBtn: !!newChatBtn,
+                clearHistoryBtn: !!clearHistoryBtn,
+                exportHistoryBtn: !!exportHistoryBtn,
+                exclusionsBtn: !!exclusionsBtn,
+                configureBtn: !!configureBtn,
+                configureNowBtn: !!configureNowBtn,
+                imageUploadButton: !!imageUploadButton,
+                imageInput: !!imageInput
+            });
+
+            // Test message channel
+            console.log('Testing message channel...');
+            vscode.postMessage({ type: 'ping', timestamp: Date.now() });
+            console.log('Ping message sent');
+
+            // Attach event listeners
+            attachEventListeners();
+        }
+
+        // Attach all event listeners
+        function attachEventListeners() {
+            console.log('=== Attaching event listeners ===');
+
+            // Get DOM elements again to ensure they're accessible in this scope
+            const chatContainer = document.getElementById('chatContainer');
+            const messageInput = document.getElementById('messageInput');
+            const sendButton = document.getElementById('sendButton');
+            const newChatBtn = document.getElementById('newChatBtn');
+            const clearHistoryBtn = document.getElementById('clearHistory');
+            const exportHistoryBtn = document.getElementById('exportHistory');
+            const exclusionsBtn = document.getElementById('configureExclusions');
+            const configureBtn = document.getElementById('configureCredentials');
+            const configureNowBtn = document.getElementById('configureNow');
+            const imageInput = document.getElementById('imageInput');
+            const imageUploadButton = document.getElementById('imageUploadButton');
+            const imagePreview = document.getElementById('imagePreview');
+            const previewImage = document.getElementById('previewImage');
+            const imageName = document.getElementById('imageName');
+            const removeImageBtn = document.getElementById('removeImage');
+
+            // Log all button elements for debugging
+            console.log('DOM elements status:', {
+                sendButton: !!sendButton,
+                messageInput: !!messageInput,
+                newChatBtn: !!newChatBtn,
+                clearHistoryBtn: !!clearHistoryBtn,
+                exportHistoryBtn: !!exportHistoryBtn,
+                exclusionsBtn: !!exclusionsBtn,
+                configureBtn: !!configureBtn,
+                configureNowBtn: !!configureNowBtn,
+                imageUploadButton: !!imageUploadButton,
+                imageInput: !!imageInput
+            });
+
+            // Send button
+            if (sendButton && !sendButton.hasAttribute('data-initialized')) {
+                sendButton.addEventListener('click', () => {
+                    console.log('✓ Send button clicked!');
+                    sendMessage();
+                });
+                sendButton.setAttribute('data-initialized', 'true');
+                console.log('✓ Send button event listener attached');
+            } else if (sendButton) {
+                console.log('✓ Send button already initialized');
+            } else {
+                console.error('✗ Send button element NOT FOUND!');
+            }
+
+            // Message input - Enter key
+            if (messageInput && !messageInput.hasAttribute('data-initialized')) {
+                messageInput.addEventListener('keydown', (e) => {
+                    if (e.key === 'Enter' && !e.shiftKey) {
+                        e.preventDefault();
+                        console.log('✓ Enter key pressed, sending message');
+                        sendMessage();
+                    }
+                });
+                messageInput.setAttribute('data-initialized', 'true');
+                console.log('✓ Message input event listener attached');
+            } else if (messageInput) {
+                console.log('✓ Message input already initialized');
+            } else {
+                console.error('✗ Message input element NOT FOUND!');
+            }
+
+            // New chat button
+            if (newChatBtn && !newChatBtn.hasAttribute('data-initialized')) {
+                newChatBtn.addEventListener('click', () => {
+                    console.log('✓ New chat button clicked');
+                    vscode.postMessage({ type: 'newChat' });
+                });
+                newChatBtn.setAttribute('data-initialized', 'true');
+                console.log('✓ New chat button event listener attached');
+            } else if (newChatBtn) {
+                console.log('✓ New chat button already initialized');
+            } else {
+                console.error('✗ New chat button element NOT FOUND!');
+            }
+
+            // Clear history button
+            if (clearHistoryBtn && !clearHistoryBtn.hasAttribute('data-initialized')) {
+                clearHistoryBtn.addEventListener('click', () => {
+                    console.log('✓ Clear history button clicked');
+                    vscode.postMessage({ type: 'clearHistory' });
+                });
+                clearHistoryBtn.setAttribute('data-initialized', 'true');
+                console.log('✓ Clear history button event listener attached');
+            } else if (clearHistoryBtn) {
+                console.log('✓ Clear history button already initialized');
+            } else {
+                console.error('✗ Clear history button element NOT FOUND!');
+            }
+
+            // Export history button
+            if (exportHistoryBtn && !exportHistoryBtn.hasAttribute('data-initialized')) {
+                exportHistoryBtn.addEventListener('click', () => {
+                    console.log('✓ Export history button clicked');
+                    vscode.postMessage({ type: 'exportHistory' });
+                });
+                exportHistoryBtn.setAttribute('data-initialized', 'true');
+                console.log('✓ Export history button event listener attached');
+            } else if (exportHistoryBtn) {
+                console.log('✓ Export history button already initialized');
+            } else {
+                console.error('✗ Export history button element NOT FOUND!');
+            }
+
+            // Exclusions button
+            if (exclusionsBtn && !exclusionsBtn.hasAttribute('data-initialized')) {
+                exclusionsBtn.addEventListener('click', () => {
+                    console.log('✓ Exclusions button clicked');
+                    vscode.postMessage({ type: 'configureExclusions' });
+                });
+                exclusionsBtn.setAttribute('data-initialized', 'true');
+                console.log('✓ Exclusions button event listener attached');
+            } else if (exclusionsBtn) {
+                console.log('✓ Exclusions button already initialized');
+            } else {
+                console.error('✗ Exclusions button element NOT FOUND!');
+            }
+
+            // Configure button
+            if (configureBtn && !configureBtn.hasAttribute('data-initialized')) {
+                configureBtn.addEventListener('click', () => {
+                    console.log('✓ Configure button clicked');
+                    vscode.postMessage({ type: 'configureCredentials' });
+                });
+                configureBtn.setAttribute('data-initialized', 'true');
+                console.log('✓ Configure button event listener attached');
+            } else if (configureBtn) {
+                console.log('✓ Configure button already initialized');
+            } else {
+                console.error('✗ Configure button element NOT FOUND!');
+            }
+
+            // Configure now button
+            if (configureNowBtn && !configureNowBtn.hasAttribute('data-initialized')) {
+                configureNowBtn.addEventListener('click', () => {
+                    console.log('✓ Configure now button clicked');
+                    vscode.postMessage({ type: 'configureCredentials' });
+                });
+                configureNowBtn.setAttribute('data-initialized', 'true');
+                console.log('✓ Configure now button event listener attached');
+            } else if (configureNowBtn) {
+                console.log('✓ Configure now button already initialized');
+            } else {
+                console.error('✗ Configure now button element NOT FOUND!');
+            }
+
+            console.log('=== Event listeners attachment complete ===');
+
+            // Stop button - cancel in-progress request
+            const stopButton = document.getElementById('stopButton');
+            if (stopButton) {
+                stopButton.addEventListener('click', () => {
+                    console.log('✓ Stop button clicked');
+                    vscode.postMessage({ type: 'stopRequest' });
+                });
+                console.log('✓ Stop button event listener attached');
+            } else {
+                console.warn('⚠ Stop button element not found (optional, may not be present yet)');
+            }
+
+            // Image upload handling - with null checks
+            if (imageUploadButton && imageInput) {
+                imageUploadButton.addEventListener('click', () => {
+                    console.log('✓ Image upload button clicked');
+                    imageInput.click();
+                });
+                console.log('✓ Image upload button event listener attached');
+
+                imageInput.addEventListener('change', (e) => {
+                    console.log('✓ Image input changed');
+                    const file = e.target.files[0];
+                    if (file) {
+                        // Check file size (max 10MB)
+                        if (file.size > 10 * 1024 * 1024) {
+                            alert('Image size must be less than 10MB');
+                            imageInput.value = '';
+                            return;
+                        }
+
+                        // Check file type
+                        if (!file.type.startsWith('image/')) {
+                            alert('Please select an image file');
+                            imageInput.value = '';
+                            return;
+                        }
+
+                        // Read and encode the image
+                        const reader = new FileReader();
+                        reader.onload = (event) => {
+                            const base64 = event.target.result.split(',')[1]; // Remove data URL prefix
+                            attachedImage = {
+                                data: base64,
+                                mimeType: file.type,
+                                name: file.name
+                            };
+
+                            // Show preview
+                            if (previewImage && imageName && imagePreview) {
+                                previewImage.src = event.target.result;
+                                imageName.textContent = file.name;
+                                imagePreview.classList.remove('hidden');
+                            }
+                        };
+                        reader.readAsDataURL(file);
+                    }
+                });
+            }
+
+            // Remove image button
+            if (removeImageBtn) {
+                removeImageBtn.addEventListener('click', () => {
+                    attachedImage = null;
+                    if (imageInput) imageInput.value = '';
+                    if (imagePreview) imagePreview.classList.add('hidden');
+                });
+            }
+        }
+
+        // Send message function
+        function sendMessage() {
+            try {
+                const messageInput = document.getElementById('messageInput');
+                console.log('sendMessage called, message:', messageInput?.value);
+                if (!messageInput) {
+                    console.error('messageInput not found!');
+                    return;
+                }
+                const message = messageInput.value.trim();
+
+                if (!message || isLoading) {
+                    console.log('Message empty or loading, returning');
+                    return;
+                }
+
+                const includeCurrentFile = document.getElementById('includeCurrentFile');
+                const includeGitDiff = document.getElementById('includeGitDiff');
+                const includeTerminal = document.getElementById('includeTerminal');
+
+                const context = {
+                    includeCurrentFile: includeCurrentFile ? includeCurrentFile.checked : false,
+                    includeGitDiff: includeGitDiff ? includeGitDiff.checked : false,
+                    includeTerminal: includeTerminal ? includeTerminal.checked : false
+                };
+
+                // Clear input and reset image attachment
+                messageInput.value = '';
+                const imageToSend = attachedImage;
+                attachedImage = null;
+                imageInput.value = '';
+                if (imagePreview) imagePreview.classList.add('hidden');
+                
+                setLoading(true);
+
+                const messageData = {
+                    type: 'sendMessage',
+                    message,
+                    context,
+                    image: imageToSend
+                };
+                console.log('Sending message to extension:', messageData);
+                vscode.postMessage(messageData);
+            } catch (error) {
+                console.error('Error in sendMessage:', error);
+                const chatContainer = document.getElementById('chatContainer');
+                if (chatContainer) {
+                    const errorDiv = document.createElement('div');
+                    errorDiv.className = 'message system';
+                    errorDiv.innerHTML = \`<div class="message-content">Error sending message: \${error.message}</div>\`;
+                    chatContainer.appendChild(errorDiv);
+                }
+                setLoading(false);
+            }
+        }
+
+// Set loading state
+function setLoading(loading, message = 'Thinking...') {
+    isLoading = loading;
+    sendButton.disabled = loading;
+    sendButton.textContent = loading ? 'Sending...' : 'Send';
+
+    const loadingIndicator = document.getElementById('loadingIndicator');
+    const loadingMessage = document.getElementById('loadingMessage');
+    const loadingContent = document.getElementById('loadingContent');
+    const stopButton = document.getElementById('stopButton');
+
+    if (loading) {
+        loadingIndicator.classList.remove('hidden');
+        loadingMessage.textContent = message;
+        if (loadingContent) {
+            loadingContent.textContent = '';
+            loadingContent.classList.add('hidden');
+        }
+        if (stopButton) {
+            stopButton.classList.remove('hidden');
+        }
+    } else {
+        loadingIndicator.classList.add('hidden');
+        if (stopButton) {
+            stopButton.classList.add('hidden');
+        }
+    }
+}
+
+// Update loading message without changing loading state
+function updateLoadingMessage(message) {
+    const loadingMessage = document.getElementById('loadingMessage');
+    if (loadingMessage) {
+        loadingMessage.textContent = message;
+    }
+}
+
+// Token counting - rough estimation (1 token ≈ 4 characters for English)
+function estimateTokens(text) {
+    if (!text) return 0;
+    // Rough estimation: ~4 characters per token for English text
+    // This is not exact but gives a reasonable approximation
+    return Math.ceil(text.length / 4);
+}
+
+// Update token display
+function updateTokenDisplay(inputTokens, outputTokens, contextWindow = 128000) {
+    const inputEl = document.getElementById('inputTokens');
+    const outputEl = document.getElementById('outputTokens');
+    const totalEl = document.getElementById('totalTokens');
+    const usageEl = document.getElementById('contextUsage');
+
+    if (inputEl) inputEl.textContent = inputTokens.toLocaleString();
+    if (outputEl) outputEl.textContent = outputTokens.toLocaleString();
+
+    const total = inputTokens + outputTokens;
+    if (totalEl) totalEl.textContent = total.toLocaleString();
+
+    if (usageEl) {
+        const usage = ((total / contextWindow) * 100).toFixed(1);
+        usageEl.textContent = usage + '%';
+
+        // Update color based on usage
+        usageEl.className = 'token-value';
+        if (parseFloat(usage) > 90) {
+            usageEl.classList.add('warning');
+        } else if (parseFloat(usage) > 75) {
+            usageEl.classList.add('high');
+        }
+    }
+}
+
+// Reset token display
+function resetTokenDisplay() {
+    updateTokenDisplay(0, 0);
+}
+
+// Streaming message handling - shows in loader like Cursor
+let streamingContent = '';
+let isStreaming = false;
+let currentInputTokens = 0;
+let currentOutputTokens = 0;
+
+function appendStreamingContent(delta) {
+    isStreaming = true;
+
+    // Show streaming content in the loading indicator
+    const loadingIndicator = document.getElementById('loadingIndicator');
+    const loadingMessage = document.getElementById('loadingMessage');
+    const loadingContent = document.getElementById('loadingContent');
+
+    if (loadingContent) {
+        loadingContent.classList.remove('hidden');
+        loadingMessage.classList.add('hidden');
+
+        // Append the delta and show it
+        streamingContent += delta;
+        loadingContent.textContent = streamingContent;
+
+        // Update output token count in real-time
+        currentOutputTokens = estimateTokens(streamingContent);
+        updateTokenDisplay(currentInputTokens, currentOutputTokens);
+
+        // Auto-scroll chat container to show latest
+        chatContainer.scrollTop = chatContainer.scrollHeight;
+    }
+}
+
+function setInputTokens(tokens) {
+    currentInputTokens = tokens;
+    updateTokenDisplay(currentInputTokens, currentOutputTokens);
+}
+
+function finalizeStreamingMessage() {
+    isStreaming = false;
+    const finalContent = streamingContent;
+    streamingContent = '';
+
+    // Hide loading indicator
+    const loadingIndicator = document.getElementById('loadingIndicator');
+    if (loadingIndicator) {
+        loadingIndicator.classList.add('hidden');
+    }
+
+    // Create the actual assistant message bubble with the complete content
+    if (finalContent) {
+        addMessage({
+            id: Date.now(),
+            role: 'assistant',
+            content: finalContent,
+            timestamp: Date.now()
+        });
+    }
+}
+
+// Store current files for accept all
+let currentFiles = [];
+let currentUserMessage = '';
+
+// Add file changes
+function addFileChanges(files, userMessage) {
+    currentFiles = files;
+    currentUserMessage = userMessage;
+
+    const changesDiv = document.createElement('div');
+    changesDiv.className = 'file-changes';
+
+    const created = files.filter(f => f.action === 'create').length;
+    const modified = files.filter(f => f.action === 'update').length;
+    const deleted = files.filter(f => f.action === 'delete').length;
+
+    let summary = 'Proposed Changes';
+    if (created > 0 || modified > 0 || deleted > 0) {
+        summary += ' (';
+        if (created > 0) summary += \`\${created} new\`;
+        if (created > 0 && modified > 0) summary += ', ';
+        if (modified > 0) summary += \`\${modified} modified\`;
+        if ((created > 0 || modified > 0) && deleted > 0) summary += ', ';
+        if (deleted > 0) summary += \`\${deleted} deleted\`;
+        summary += ')';
+    }
+
+    changesDiv.innerHTML = \`
+        <div class="file-changes-header">
+            <h3>\${escapeHtml(summary)}</h3>
+            <button class="accept-all-button" onclick="acceptAllChanges()">Accept All</button>
+        </div>
+    \`;
+
+    files.forEach(file => {
+        const fileDiv = document.createElement('div');
+        fileDiv.className = \`file-change \${file.action}\`;
+
+        const badgeLabels = {
+            'create': 'NEW',
+            'update': 'MODIFIED',
+            'delete': 'DELETED'
+        };
+
+        fileDiv.innerHTML = \`
+            <div class="file-change-info">
+                <div class="file-change-path">
+                    \${escapeHtml(file.path)}
+                    <span class="file-change-badge \${file.action}">\${badgeLabels[file.action] || file.action.toUpperCase()}</span>
+                </div>
+            </div>
+            <div class="file-change-actions">
+                <button onclick="openFile('\${escapeHtml(file.path)}')">View</button>
+                <button onclick="acceptSingleChange('\${escapeHtml(file.path)}', '\${escapeHtml(file.action)}')">Accept</button>
+            </div>
+        \`;
+        changesDiv.appendChild(fileDiv);
+    });
+
+    chatContainer.appendChild(changesDiv);
+    chatContainer.scrollTop = chatContainer.scrollHeight;
+}
+
+// Add message to chat
+function addMessage(message) {
+    try {
+        // Check for duplicate messages by ID
+        if (message.id) {
+            const existingMessage = chatContainer.querySelector(\`[data-message-id="\${message.id}"]\`);
+            if (existingMessage) {
+                console.log('Duplicate message detected, skipping:', message.id);
+                return;
+            }
+        }
+
+        // Remove empty state
+        const emptyState = chatContainer.querySelector('.empty-state');
+        if (emptyState) {
+            emptyState.remove();
+        }
+
+        const messageDiv = document.createElement('div');
+        messageDiv.className = \`message \${message.role}\`;
+        if (message.id) {
+            messageDiv.setAttribute('data-message-id', message.id);
+        }
+        messageDiv.innerHTML = \`<div class="message-content">\${escapeHtml(message.content)}</div>\`;
+
+        chatContainer.appendChild(messageDiv);
+        chatContainer.scrollTop = chatContainer.scrollHeight;
+
+        // Add file changes if present
+        if (message.files && message.files.length > 0) {
+            addFileChanges(message.files, message.content);
+        }
+    } catch (error) {
+        console.error('Error in addMessage:', error);
+    }
+}
+        // Open file
+        function openFile(path) {
+            vscode.postMessage({
+                type: 'openFile',
+                path
+            });
+        }
+
+        // Escape HTML
+        function escapeHtml(text) {
+            const div = document.createElement('div');
+            div.textContent = text;
+            return div.innerHTML;
+        }
+
+        // Initialize when DOM is ready
+        function initializeChat() {
+            // Prevent multiple event listener attachments
+            if (window.chatPanelInitialized) {
+                console.log('Chat panel already initialized, skipping...');
+                return;
+            }
+            window.chatPanelInitialized = true;
+
+            if (document.readyState === 'loading') {
+                document.addEventListener('DOMContentLoaded', initializeDOMElements);
+            } else {
+                // DOM is already ready, initialize immediately
+                initializeDOMElements();
+            }
+
+            // Fallback: Try initialization after a short delay in case DOM is not ready
+            setTimeout(() => {
+                const sendButton = document.getElementById('sendButton');
+                if (!sendButton || !sendButton.hasAttribute('data-initialized')) {
+                    console.log('Fallback initialization triggered');
+                    initializeDOMElements();
+                }
+            }, 1000);
+        }
+
+        // Start initialization
+        initializeChat();
+
+        // Handle messages from extension
+        window.addEventListener('message', (event) => {
+            const message = event.data;
+            console.log('← Received message from extension:', message.type);
+
+            switch (message.type) {
+                case 'pong':
+                    console.log('✓ Communication channel working! Pong received');
+                    break;
+                case 'clearChat':
+                    chatContainer.innerHTML = '';
+                    break;
+                case 'messageAdded':
+                    addMessage(message.message);
+                    break;
+                case 'messageDelta':
+                    // Handle streaming response - append chunks in real-time
+                    appendStreamingContent(message.delta);
+                    break;
+                case 'streamingComplete':
+                    // Streaming finished, finalize the message
+                    finalizeStreamingMessage();
+                    break;
+                case 'loadingStarted':
+                    setLoading(true, message.message);
+                    resetTokenDisplay();
+                    // Show token usage display
+                    const tokenUsageEl = document.getElementById('tokenUsage');
+                    if (tokenUsageEl) {
+                        tokenUsageEl.classList.remove('hidden');
+                    }
+                    break;
+                case 'loadingUpdate':
+                    updateLoadingMessage(message.message);
+                    break;
+                case 'tokenUpdate':
+                    if (message.inputTokens !== undefined) {
+                        setInputTokens(message.inputTokens);
+                    }
+                    if (message.contextWindow !== undefined) {
+                        const contextEl = document.getElementById('contextWindow');
+                        if (contextEl) {
+                            const context = message.contextWindow >= 1000
+                                ? (message.contextWindow / 1000).toFixed(0) + 'K'
+                                : message.contextWindow;
+                            contextEl.textContent = context;
+                        }
+                    }
+                    break;
+                case 'loadingStopped':
+                    setLoading(false);
+                    // Hide token usage display
+                    const tokenUsageEl2 = document.getElementById('tokenUsage');
+                    if (tokenUsageEl2) {
+                        tokenUsageEl2.classList.add('hidden');
+                    }
+                    // Also finalize streaming if active
+                    if (isStreaming) {
+                        finalizeStreamingMessage();
+                    }
+                    break;
+                case 'error':
+                    if (isStreaming) {
+                        finalizeStreamingMessage();
+                    }
+                    addMessage({
+                        id: Date.now(),
+                        role: 'system',
+                        content: 'Error: ' + message.message,
+                        timestamp: Date.now()
+                    });
+                    setLoading(false);
+                    break;
+                case 'historyCleared':
+                    chatContainer.innerHTML = \`
+                        <div class="empty-state">
+                            <h2>Chat Cleared</h2>
+                            <p>Start a new conversation!</p>
+                        </div>
+                    \`;
+                    break;
+                case 'changesApplied':
+                    addMessage({
+                        id: Date.now(),
+                        role: 'system',
+                        content: 'Changes applied successfully!',
+                        timestamp: Date.now()
+                    });
+                    break;
+                case 'requestStopped':
+                    // Request was cancelled by user
+                    setLoading(false);
+                    if (isStreaming) {
+                        finalizeStreamingMessage();
+                    }
+                    addMessage({
+                        id: Date.now(),
+                        role: 'system',
+                        content: 'Request cancelled by user.',
+                        timestamp: Date.now()
+                    });
+                    break;
+                case 'sessionsList':
+                    console.log('Sessions list received:', message.sessions);
+                    // Could update a session selector UI here if needed
+                    break;
+                case 'sessionLoaded':
+                    console.log('Session loaded:', message.session);
+                    // Load session messages
+                    if (message.session && message.session.messages) {
+                        message.session.messages.forEach(msg => addMessage(msg));
+                    }
+                    break;
+                case 'terminalCommandExecuted':
+                    addMessage({
+                        id: Date.now(),
+                        role: 'system',
+                        content: \`Terminal command executed: \${message.command.command}\nOutput: \${message.command.output}\`,
+                        timestamp: Date.now()
+                    });
+                    break;
+                case 'info':
+                    addMessage({
+                        id: Date.now(),
+                        role: 'system',
+                        content: message.message,
+                        timestamp: Date.now()
+                    });
+                    break;
+                case 'portCheckResult':
+                    addMessage({
+                        id: Date.now(),
+                        role: 'system',
+                        content: \`Port \${message.port} is \${message.inUse ? 'in use' : 'available'}\`,
+                        timestamp: Date.now()
+                    });
+                    break;
+            }
+        });
+    </script>
+</body>
+</html>`;
+    }
+}

@@ -36,6 +36,24 @@ export class CredentialManager {
     private static readonly SYSTEM_PROMPT_KEY = 'custom.system.prompt';
     private static readonly DEFAULT_SYSTEM_PROMPT = `You are KBot, an expert coding assistant.
 
+## CRITICAL: LINE NUMBERING (ZERO-INDEXED)
+
+**Line numbers start at 0, NOT 1!**
+- Line 0 = first line
+- Line 1 = second line
+- Line 2 = third line
+- etc.
+
+Example:
+\`\`\`
+print('Hello, World!')    ← Line 0
+                           ← Line 1 (empty)
+for i in range(10):       ← Line 2
+    print(i)              ← Line 3
+\`\`\`
+
+When replacing "range(10)" with "range(20)", you would target **line 2**, not line 3!
+
 ## CRITICAL: HOW TO MAKE CODE CHANGES
 
 When the user asks you to modify, create, or change ANY file, you MUST respond with JSON format:
@@ -66,14 +84,14 @@ If the user asks a question that doesn't require file changes, just answer norma
 **You:**
 \`\`\`json
 {
-  "explanation": "Changed range from 10 to 20",
+  "explanation": "Changed range from 10 to 20 in the for loop (line 2)",
   "files": [
     {
       "path": "hello.py",
       "edits": [
         {
-          "startLine": 0,
-          "endLine": 0,
+          "startLine": 2,
+          "endLine": 2,
           "newContent": "for i in range(20):"
         }
       ]

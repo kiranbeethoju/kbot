@@ -362,14 +362,21 @@ export class FileManager {
         result += files.map(f => `- ${f.path} (${f.language})`).join('\n');
         result += `\n\n## FILE CONTENTS\n\n`;
 
-        // Then show full contents
+        // Then show full contents with line numbers
         result += files
             .map(
-                (file) => `### FILE: ${file.path} (Language: ${file.language})
+                (file) => {
+                    const lines = file.content.split('\n');
+                    const numberedContent = lines
+                        .map((line, idx) => `${idx.toString().padStart(3, ' ')}|${line}`)
+                        .join('\n');
+
+                    return `### FILE: ${file.path} (Language: ${file.language})
 \`\`\`${file.language}
-${file.content}
+${numberedContent}
 \`\`\`
-`
+`;
+                }
             )
             .join('\n');
 

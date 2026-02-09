@@ -49,8 +49,8 @@ export class GitManager {
             Logger.log('Initializing git repository...');
 
             await execAsync('git init', { cwd: this.workspaceRoot });
-            await execAsync('git config user.name "Prime DevBot"', { cwd: this.workspaceRoot });
-            await execAsync('git config user.email "azure-gpt@vscode"', { cwd: this.workspaceRoot });
+            await execAsync('git config user.name "KBot"', { cwd: this.workspaceRoot });
+            await execAsync('git config user.email "kbot@vscode"', { cwd: this.workspaceRoot });
 
             // Create initial commit
             await this.createCommit('chore: initial commit - AI assistant tracking', true);

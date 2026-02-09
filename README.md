@@ -1,20 +1,26 @@
-# Local Prime DevBot
+# KBot
 
 **Author:** Kiran Beethoju
 **License:** MIT
-**Version:** 1.0.0
+**Version:** 1.4.0
 
-A Cursor-like AI coding assistant powered by Azure OpenAI. Built for developers who want intelligent code assistance without compromising privacy.
+A Cursor-like AI coding assistant powered by Azure OpenAI, NVIDIA, Anthropic Foundry, and Z.AI. Built for developers who want intelligent code assistance with shell command execution capabilities without compromising privacy.
 
 ## Features
 
 ✅ **100% Local** - No telemetry, no cloud storage, no data tracking
-✅ **Azure OpenAI Integration** - Use your own Azure OpenAI endpoint
+✅ **Multiple Provider Support** - Azure OpenAI, NVIDIA, Anthropic Foundry, Z.AI (GLM)
+✅ **Shell Command Execution** - AI can run terminal commands automatically
 ✅ **Context-Aware** - Understands your entire codebase
+✅ **Git Integration** - Auto-commit changes with AI attribution
 ✅ **File Operations** - Preview and apply code changes safely
 ✅ **Backup & Rollback** - Automatic backups before any modifications
-✅ **Chat History** - Save and export your conversations
+✅ **Chat History** - Save, export, and manage conversations
 ✅ **Streaming Responses** - Watch the AI think in real-time
+✅ **Custom System Prompts** - Edit and customize AI behavior
+✅ **File Exclusions** - Manage which files to exclude from context
+✅ **Multi-Provider Support** - Switch between Azure, NVIDIA, Anthropic Foundry, and Z.AI
+✅ **Manual Workspace Configuration** - Set custom workspace directory
 
 ## Privacy First
 
@@ -22,17 +28,17 @@ This extension is designed with privacy as the top priority:
 
 - ❌ **No telemetry** - We don't track your usage
 - ❌ **No cloud storage** - Your data stays on your machine
-- ❌ **No external connections** - Only connects to your Azure endpoint
+- ❌ **No external connections** - Only connects to your configured endpoint
 - ✅ **Local credentials** - Stored securely in VS Code's secret storage
 - ✅ **Transparent** - Open source, inspect all code
 
-Your code never leaves your machine except for Azure GPT API calls.
+Your code never leaves your machine except for API calls to your configured provider.
 
 ## Installation
 
 ### From VSIX
 
-1. Download the latest `.vsix` file
+1. Download the latest `.vsix` file from [Releases](https://github.com/kiranbeethoju/kbot/releases)
 2. In VS Code, go to **Extensions** → **Install from VSIX...**
 3. Select the downloaded file
 
@@ -49,48 +55,97 @@ npm run package
 ### First Time Configuration
 
 1. Open the Command Palette (`Cmd+Shift+P` / `Ctrl+Shift+P`)
-2. Run `Azure GPT: Configure Azure Credentials`
-3. Enter your Azure OpenAI details:
-   - **Endpoint**: Your Azure OpenAI endpoint URL
-   - **API Key**: Your Azure OpenAI API key
-   - **Deployment Name**: Your deployment name (e.g., `gpt-4`)
-   - **API Version**: API version (default: `2024-02-15-preview`)
-   - **Model Name**: Model name (e.g., `gpt-4`)
+2. Run `KBot: Configure KBot Credentials`
+3. Choose your provider (Azure, NVIDIA, Anthropic Foundry, or Z.AI)
+4. Enter your credentials:
+
+#### Azure OpenAI
+- **Endpoint**: Your Azure OpenAI endpoint URL
+- **API Key**: Your Azure OpenAI API key
+- **Deployment Name**: Your deployment name (e.g., `gpt-4`)
+- **API Version**: API version (default: `2024-02-15-preview`)
+- **Model Name**: Model name (e.g., `gpt-4`)
+
+#### NVIDIA API
+- **Endpoint**: Your NVIDIA API endpoint URL
+- **Model Name**: Model name (e.g., `nemotron-4-340b-instruct`)
+- **Provider Name**: Custom name for this configuration
+
+#### Anthropic Foundry (Azure-hosted Claude)
+- **Endpoint**: Your Anthropic Foundry endpoint (e.g., `https://<resource>.openai.azure.com/anthropic`)
+- **API Key**: Your Anthropic API key
+- **Deployment Name**: Deployment name (e.g., `claude-opus-4_5-dev`)
+
+#### Z.AI (GLM Models)
+- **API Key**: Your Z.AI API key
+- **Model Name**: Model name (e.g., `glm-4.7`, `glm-4-plus`)
 
 ### Azure OpenAI Prerequisites
 
 You need:
 - An Azure account with OpenAI access
 - An Azure OpenAI resource created
-- A model deployed (GPT-4 or GPT-3.5-Turbo recommended)
+- A model deployed (GPT-4, GPT-4o, or GPT-3.5-Turbo recommended)
 
 Get started with Azure OpenAI: [Azure OpenAI Service](https://azure.microsoft.com/en-us/products/ai-services/openai-service)
+
+### NVIDIA API Prerequisites
+
+You need:
+- Access to NVIDIA API endpoints
+- Valid API endpoint URL
+- Model name for deployment
 
 ## Usage
 
 ### Opening the Chat
 
-- Command Palette: `Azure GPT: Open Azure GPT Chat`
-- Or click the Azure GPT icon in the activity bar
+- Click the **KBot** icon in the activity bar
+- Or use the sidebar panel to switch between **Chat**, **Credentials**, and **History**
+
+### Shell Command Execution
+
+The AI can automatically execute shell commands when you request file system operations:
+
+**Examples:**
+```
+"List all files in the current directory"
+"Show me running Node.js processes"
+"Install the lodash package"
+"Check git status"
+"Run the test suite"
+"Build the project"
+```
+
+The AI will:
+1. Execute the command in your workspace directory
+2. Display the output in the chat
+3. Use the results for follow-up actions
+
+**Security:** Commands are executed in your workspace directory. You can review all commands before they run in the logs.
 
 ### Context Options
 
-Before sending a message, choose what context to include:
+The AI automatically includes all workspace files (excluding common patterns like `node_modules`, `.git`, `.kbot-backup`, etc.):
 
-- ✅ **Current File** - Include the active editor file
-- ✅ **Selected Files** - Include files selected in explorer
-- ✅ **Git Diff** - Include recent git changes
-- ✅ **Terminal** - Include terminal output
+- ✅ **Auto-included**: All source files from workspace
+- ✅ **Current File**: Active editor file
+- ✅ **Git Diff**: Recent git changes (when available)
+- ✅ **Terminal**: Terminal output (when available)
 
 ### Example Prompts
 
 ```
+"List all TypeScript files in the src directory"
+"Find all files containing 'TODO' comments"
+"Show me the git diff for package.json"
+"Install the axios package"
+"Run the development server"
+"Check for running processes on port 3000"
 "Refactor this function to be more readable"
 "Add error handling to this code"
-"Explain how this function works"
 "Convert this to TypeScript"
 "Add unit tests for this class"
-"Find security vulnerabilities in this code"
 ```
 
 ### Applying Changes
@@ -100,17 +155,84 @@ When the AI suggests code changes:
 1. Review the proposed changes in the chat
 2. Click **Apply** on each file change
 3. Changes are backed up automatically
-4. Use `Azure GPT: Rollback Last Changes` to undo
+4. Git commits are created automatically (if enabled)
+
+### Custom System Prompts
+
+Customize how the AI behaves:
+
+1. Go to the **Credentials** tab
+2. Use the **System Prompt Editor** section
+3. Edit the prompt and click **Save System Prompt**
+4. Use placeholders like `{fileCount}`, `{includeGitDiff}`, `{includeTerminal}`
+
+### File Exclusions
+
+Manage which files are excluded from AI context:
+
+1. Command Palette: `KBot: Manage File Exclusions`
+2. Add glob patterns (e.g., `*.log`, `dist/`, `coverage/`)
+3. Save to apply
+
+### Workspace Configuration
+
+Configure a custom workspace directory:
+
+1. Command Palette: `KBot: Configure Workspace Directory`
+2. Choose to set a custom path or use auto-detect
+3. Custom workspace persists across sessions
 
 ## Commands
 
 | Command | Description |
 |---------|-------------|
-| `Azure GPT: Open Azure GPT Chat` | Open the chat panel |
-| `Azure GPT: Configure Azure Credentials` | Set up Azure OpenAI credentials |
-| `Azure GPT: Clear Chat History` | Clear all conversation history |
-| `Azure GPT: Export Chat History` | Export chat to JSON file |
-| `Azure GPT: Rollback Last Changes` | Undo last applied changes |
+| `KBot: Open KBot Chat` | Open the chat panel |
+| `KBot: Configure KBot Credentials` | Set up API credentials |
+| `KBot: Show KBot Logs` | View extension logs |
+| `KBot: Manage File Exclusions` | Manage excluded file patterns |
+| `KBot: Configure System Prompts` | Customize AI behavior |
+| `KBot: Configure Workspace Directory` | Set custom workspace path |
+
+## Features in Detail
+
+### Shell Command Execution
+
+The AI can execute shell commands for:
+- File listing and directory navigation (`ls`, `pwd`, `find`)
+- Process management (`ps`, `kill`, `lsof`)
+- Package management (`npm install`, `pip install`)
+- Git operations (`git status`, `git log`, `git diff`)
+- Build and test commands (`npm test`, `make build`)
+- HTTP requests (`curl`)
+
+All commands are logged with visual indicators:
+- 🔧 Executing command
+- ✓ Command succeeded with output
+- ✗ Command failed with error
+
+### Git Integration
+
+When Git is enabled:
+- Changes are automatically committed with AI attribution
+- Commit messages reference your original request
+- Original file content is preserved for diffs
+- View history in the History tab
+
+### Provider Switching
+
+Switch between providers:
+1. Go to **Credentials** tab
+2. Select Azure, NVIDIA, Anthropic Foundry, or Z.AI from dropdown
+3. Configure credentials for each provider
+4. Switch anytime without re-entering credentials
+
+### Chat History
+
+- All conversations saved automatically
+- Export sessions to JSON
+- Search and filter history
+- Delete old sessions
+- View detailed message history
 
 ## Data Storage
 
@@ -118,51 +240,82 @@ All data is stored locally on your machine:
 
 | Data | Location |
 |------|----------|
-| API Key | VS Code SecretStorage (encrypted) |
+| API Keys | VS Code SecretStorage (encrypted) |
 | Credentials | VS Code GlobalState (local) |
-| Chat History | Optional export to workspace |
-| File Backups | `.local-azure-gpt-backup/` in workspace |
+| Chat History | VS Code GlobalState (local) |
+| File Backups | `.kbot-backup/` in workspace |
+| Git Commits | Your local git repository |
 
 ## Troubleshooting
 
 ### "Credentials not configured"
 
-Run `Azure GPT: Configure Azure Credentials` and enter your Azure OpenAI details.
+Run `KBot: Configure KBot Credentials` and enter your API details.
 
-### "Failed to call Azure OpenAI"
+### "Failed to call API"
 
 Check:
 - Your endpoint URL is correct
 - Your API key is valid
-- Your deployment name exists
-- Your Azure subscription has quota
+- Your deployment/model name exists
+- Your subscription has quota available
+
+### Shell commands not executing
+
+Check:
+- Command syntax is valid for your OS
+- Required tools are installed (e.g., `git`, `node`, `python`)
+- Workspace directory is accessible
+- View logs: `KBot: Show KBot Logs`
+
+### "No files available in workspace"
+
+- Ensure you have a workspace folder open
+- Check file exclusion patterns
+- Verify files are not in excluded directories (node_modules, .git, etc.)
+- Backup files (.kbot-backup) are automatically excluded
 
 ### Streaming not working
 
-Make sure your Azure OpenAI deployment supports streaming (most do).
+Make sure your API deployment supports streaming (most do).
 
 ## Compatibility
 
 - **VS Code**: 1.75.0 and higher
 - **Platforms**: Windows, macOS, Linux
-- **Azure OpenAI**: GPT-4, GPT-3.5-Turbo, GPT-4o
+- **Providers**:
+  - Azure OpenAI: GPT-4, GPT-4o, GPT-4-turbo, GPT-3.5-Turbo
+  - NVIDIA: Nemotron, LLMs hosted on NVIDIA endpoints
+  - Anthropic Foundry: Claude models on Azure
+  - Z.AI: GLM-4.7, GLM-4-Plus, and other GLM models
 
 ## Architecture
 
 ```
-local-azure-gpt/
+kbot/
 ├── src/
-│   ├── extension.ts      # Main entry point
-│   ├── chatPanel.ts      # Chat UI (webview)
-│   ├── credentials.ts    # Credential management
-│   ├── azureGPT.ts       # Azure OpenAI API client
-│   ├── fileManager.ts    # File operations
-│   └── backupManager.ts  # Backup & rollback
+│   ├── extension.ts                  # Main entry point
+│   ├── chatPanel.ts                  # Chat UI (webview)
+│   ├── credentials.ts                # Credential management
+│   ├── azureGPT.ts                   # Azure OpenAI API client
+│   ├── nvidiaService.ts              # NVIDIA API client
+│   ├── anthropicFoundryService.ts    # Anthropic Foundry API client
+│   ├── zaiService.ts                 # Z.AI API client
+│   ├── fileManager.ts                # File operations & workspace scanning
+│   ├── terminalManager.ts            # Shell command execution
+│   ├── gitManager.ts                 # Git integration
+│   ├── backupManager.ts              # Backup & rollback
+│   ├── workspaceManager.ts           # Workspace configuration
+│   ├── chatHistoryManager.ts         # Chat history persistence
+│   ├── exclusionManager.ts           # File exclusion patterns
+│   ├── credentialsView.ts            # Credentials UI (webview)
+│   ├── chatHistoryView.ts            # History UI (webview)
+│   └── logger.ts                     # Logging utilities
 ├── resources/
-│   └── icon.svg          # Extension icon
-├── package.json          # Extension manifest
-├── tsconfig.json         # TypeScript config
-└── README.md             # This file
+│   └── icon.svg                      # Extension icon
+├── package.json                      # Extension manifest
+├── tsconfig.json                     # TypeScript config
+└── README.md                         # This file
 ```
 
 ## Security
@@ -170,8 +323,9 @@ local-azure-gpt/
 - API keys stored in VS Code's encrypted SecretStorage
 - No credentials in plain text or logs
 - File backups isolated to workspace
-- No code execution without user approval
+- Shell commands executed with user notification
 - All file changes previewed before applying
+- Open source - inspect all code
 
 ## Development
 
@@ -187,6 +341,9 @@ npm run compile
 
 # Package VSIX
 npm run package
+
+# Install locally for testing
+code --install-extension kbot-1.4.0.vsix
 ```
 
 ## License
@@ -201,20 +358,72 @@ MIT License - See LICENSE file for details
 
 ## Changelog
 
-### 1.0.0 (2026-02-02)
+### 1.4.0 (2025-02-08)
 
-- Initial release
-- Azure OpenAI integration
-- Chat interface with streaming
-- File operations with backup
-- Context-aware code assistance
-- Privacy-first design
+**NEW: Z.AI (GLM) Support**
+- Added support for Z.AI GLM models (glm-4.7, glm-4-plus, etc.)
+- New provider option for Z.AI API
+- Full credential management for Z.AI
+
+**NEW: Anthropic Foundry Support**
+- Added support for Anthropic Foundry (Azure-hosted Claude models)
+- Configure Anthropic Foundry endpoints and deployments
+- Support for claude-opus-4_5-dev and other Claude models
+
+**NEW: Manual Workspace Configuration**
+- Configure custom workspace directory
+- Option to use auto-detect or set specific path
+- Workspace configuration persists across sessions
+
+**Improvements:**
+- Fixed credential update bug (now can properly change API keys)
+- Backup files (.kbot-backup) now excluded from context
+- Better UX with "Change API Key" checkbox for all providers
+- Improved workspace detection - now uses current opened project
+
+### 1.3.0 (2025-02-08)
+
+**Improvements:**
+- Enhanced workspace file detection
+- Better context collection
+- Improved file exclusion handling
+
+### 1.2.0 (2025-02-08)
+
+**NEW: Workspace Directory Configuration**
+- Configure workspace directory from UI
+- Set custom workspace or use auto-detect
+- Workspace settings shown in Credentials panel
+
+**Improvements:**
+- Fixed workspace path to use current working directory by default
+- Better workspace detection when opening projects
+
+### 1.1.8 (2025-02-04)
+
+**NEW: Shell Command Execution**
+- AI can now execute shell commands automatically
+- Commands run in workspace directory
+- Full output logging and display
+- Security: All commands logged and visible
+
+**Other Improvements:**
+- Enhanced workspace file detection (dynamic path resolution)
+- Improved file collection logging
+- Better context from workspace files
+
+### 1.1.7 (2025-02-04)
+
+**Bug Fixes:**
+- Fixed workspace path detection
+- Made workspace root detection dynamic
+- Improved path resolution
 
 ## Support
 
 For issues, questions, or contributions:
-- Open an issue on GitHub
-- Check existing discussions
+- Open an issue on [GitHub](https://github.com/kiranbeethoju/kbot/issues)
+- Check existing [discussions](https://github.com/kiranbeethoju/kbot/discussions)
 - Read the code - it's open source!
 
 ## Acknowledgments
@@ -222,8 +431,11 @@ For issues, questions, or contributions:
 Built with:
 - [VS Code Extension API](https://code.visualstudio.com/api)
 - [Azure OpenAI Service](https://azure.microsoft.com/en-us/products/ai-services/openai-service)
+- [NVIDIA API](https://www.nvidia.com/en-us/data-center/products/)
+- [Anthropic](https://www.anthropic.com/)
+- [Z.AI](https://www.z.ai/)
 - [TypeScript](https://www.typescriptlang.org/)
 
 ---
 
-**Note**: This extension is not affiliated with Cursor or Microsoft. It's an independent project designed to bring Cursor-like functionality to VS Code using Azure OpenAI.
+**Note**: This extension is not affiliated with Cursor or Microsoft. It's an independent project designed to bring Cursor-like functionality to VS Code using your preferred AI provider.

@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100" fill="none">
+  <!-- Background circle -->
+  <circle cx="50" cy="50" r="45" fill="#0078D4" />
+
+  <!-- AI/A symbol -->
+  <path d="M35 70 L35 30 L50 30 L50 45 L60 30 L75 30 L55 50 L75 70 L60 70 L50 55 L50 70 Z" fill="white" />
+
+  <!-- Chat bubble accent -->
+  <circle cx="75" cy="25" r="12" fill="#00BCF2" />
+  <path d="M72 22 L78 22 L78 28 L72 28 Z" fill="white" />
+
+  <!-- Azure lightning accent -->
+  <path d="M25 65 L20 75 L28 75 L23 85 L35 70 L28 70 L33 60 L25 65 Z" fill="#FFB900" />
+</svg>

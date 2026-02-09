@@ -13,7 +13,7 @@ export interface ExclusionConfig {
 }
 
 export class ExclusionManager {
-    private static readonly CONFIG_KEY = 'azure.gpt.exclusions';
+    private static readonly CONFIG_KEY = 'kbot.exclusions';
     private static readonly DEFAULT_CONFIG: ExclusionConfig = {
         excludePatterns: [
             '**/*.secret',
@@ -45,7 +45,9 @@ export class ExclusionManager {
             '__pycache__',
             'venv',
             '.venv',
-            'env'
+            'env',
+            '.kbot-backup',
+            '.local-azure-gpt-backup'
         ],
         excludeFiles: []
     };

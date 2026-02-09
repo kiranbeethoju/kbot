@@ -7,13 +7,15 @@ import * as vscode from 'vscode';
 import { CredentialManager } from './credentials';
 import { Logger } from './logger';
 import { ProviderType, NvidiaCredentials } from './types';
+import { WorkspaceManager } from './workspaceManager';
 
 export class CredentialsViewProvider implements vscode.WebviewViewProvider {
     private view?: vscode.WebviewView;
 
     constructor(
         private extensionUri: vscode.Uri,
-        private credentialManager: CredentialManager
+        private credentialManager: CredentialManager,
+        private workspaceManager?: WorkspaceManager
     ) {}
 
     public resolveWebviewView(
@@ -38,6 +40,15 @@ export class CredentialsViewProvider implements vscode.WebviewViewProvider {
                     break;
                 case 'getWorkspaceInfo':
                     await this.sendWorkspaceInfo();
+                    break;
+                case 'getWorkspaceConfig':
+                    await this.sendWorkspaceConfig();
+                    break;
+                case 'setCustomWorkspace':
+                    await this.setCustomWorkspace(data.path);
+                    break;
+                case 'clearCustomWorkspace':
+                    await this.clearCustomWorkspace();
                     break;
                 case 'switchProvider':
                     await this.switchProvider(data.provider);
@@ -66,6 +77,12 @@ export class CredentialsViewProvider implements vscode.WebviewViewProvider {
                 case 'resetSystemPrompt':
                     await this.resetSystemPrompt();
                     break;
+                case 'saveAnthropicCredentials':
+                    await this.saveAnthropicCredentials(data.credentials);
+                    break;
+                case 'saveZaiCredentials':
+                    await this.saveZaiCredentials(data.credentials);
+                    break;
             }
         });
 
@@ -81,15 +98,124 @@ export class CredentialsViewProvider implements vscode.WebviewViewProvider {
      * Send workspace information to webview
      */
     private async sendWorkspaceInfo(): Promise<void> {
-        const workspaceFolders = vscode.workspace.workspaceFolders;
-        const workspacePath = workspaceFolders && workspaceFolders.length > 0
-            ? workspaceFolders[0].uri.fsPath
-            : process.cwd();
+        let workspacePath: string;
+
+        // Check if custom workspace is configured
+        if (this.workspaceManager) {
+            const customWorkspace = await this.workspaceManager.getWorkspaceRoot();
+            if (customWorkspace) {
+                workspacePath = customWorkspace;
+            } else {
+                // Use auto-detect: Always prefer VS Code workspace folder when available
+                const workspaceFolders = vscode.workspace.workspaceFolders;
+                if (workspaceFolders && workspaceFolders.length > 0) {
+                    workspacePath = workspaceFolders[0].uri.fsPath;
+                } else {
+                    // No workspace open, use process.cwd() as fallback
+                    workspacePath = process.cwd();
+                }
+            }
+        } else {
+            // Fallback if no workspace manager - prefer VS Code workspace
+            const workspaceFolders = vscode.workspace.workspaceFolders;
+            if (workspaceFolders && workspaceFolders.length > 0) {
+                workspacePath = workspaceFolders[0].uri.fsPath;
+            } else {
+                workspacePath = process.cwd();
+            }
+        }
 
         this.sendMessage({
             type: 'workspaceInfo',
             workspacePath
         });
+    }
+
+    /**
+     * Send workspace configuration to webview
+     */
+    private async sendWorkspaceConfig(): Promise<void> {
+        if (!this.workspaceManager) {
+            return;
+        }
+
+        const config = await this.workspaceManager.getWorkspaceConfig();
+        const workspaceFolders = vscode.workspace.workspaceFolders;
+        const vsCodeWorkspace = workspaceFolders && workspaceFolders.length > 0
+            ? workspaceFolders[0].uri.fsPath
+            : process.cwd();
+
+        // Get the actual workspace path being used
+        let actualWorkspacePath: string;
+        if (config.useAutoDetect) {
+            // In auto-detect mode, use VS Code workspace folder
+            actualWorkspacePath = vsCodeWorkspace;
+        } else {
+            // In custom mode, use custom workspace path if set, otherwise fall back
+            actualWorkspacePath = config.customWorkspacePath || vsCodeWorkspace;
+        }
+
+        this.sendMessage({
+            type: 'workspaceConfigLoaded',
+            config: {
+                useAutoDetect: config.useAutoDetect,
+                customWorkspacePath: config.customWorkspacePath || '',
+                vsCodeWorkspace,
+                actualWorkspacePath
+            }
+        });
+    }
+
+    /**
+     * Set custom workspace path
+     */
+    private async setCustomWorkspace(path: string): Promise<void> {
+        if (!this.workspaceManager) {
+            return;
+        }
+
+        try {
+            await this.workspaceManager.setCustomWorkspacePath(path);
+            vscode.window.showInformationMessage(`Custom workspace set to: ${path}`);
+            this.sendMessage({
+                type: 'workspaceSaved',
+                success: true
+            });
+            await this.sendWorkspaceConfig();
+        } catch (error: any) {
+            vscode.window.showErrorMessage(`Failed to set workspace: ${error.message}`);
+            this.sendMessage({
+                type: 'workspaceSaved',
+                success: false,
+                error: error.message
+            });
+        }
+    }
+
+    /**
+     * Clear custom workspace
+     */
+    private async clearCustomWorkspace(): Promise<void> {
+        if (!this.workspaceManager) {
+            return;
+        }
+
+        try {
+            await this.workspaceManager.clearCustomWorkspace();
+            vscode.window.showInformationMessage('Workspace reverted to auto-detect mode');
+            this.sendMessage({
+                type: 'workspaceSaved',
+                success: true
+            });
+            await this.sendWorkspaceConfig();
+        } catch (error: any) {
+            vscode.window.showErrorMessage(`Failed to clear workspace: ${error.message}`);
+            this.sendMessage({
+                type: 'workspaceSaved',
+                success: false,
+                error: error.message
+            });
+        }
     }
 
     /**
@@ -100,6 +226,14 @@ export class CredentialsViewProvider implements vscode.WebviewViewProvider {
         const azureCreds = await this.credentialManager.getAzureCredentials();
         const nvidiaCreds = await this.credentialManager.getAllNvidiaCredentials();
         const selectedNvidiaModel = await this.credentialManager.getSelectedNvidiaModel();
+        const anthropicCreds = await this.credentialManager.getAnthropicFoundryCredentials();
+        const zaiCreds = await this.credentialManager.getZaiCredentials();
+
+        // Mask NVIDIA API keys for security
+        const maskedNvidiaCreds = nvidiaCreds.map(cred => ({
+            ...cred,
+            apiKey: cred.apiKey ? '••••••••' : undefined
+        }));
 
         this.sendMessage({
             type: 'stateLoaded',
@@ -109,8 +243,16 @@ export class CredentialsViewProvider implements vscode.WebviewViewProvider {
                     ...azureCreds,
                     apiKey: azureCreds.apiKey ? '••••••••' : ''
                 } : null,
-                nvidia: nvidiaCreds,
-                selectedNvidiaModel
+                nvidia: maskedNvidiaCreds,
+                selectedNvidiaModel,
+                anthropic: anthropicCreds ? {
+                    ...anthropicCreds,
+                    apiKey: anthropicCreds.apiKey ? '••••••••' : ''
+                } : null,
+                zai: zaiCreds ? {
+                    ...zaiCreds,
+                    apiKey: zaiCreds.apiKey ? '••••••••' : ''
+                } : null
             }
         });
 
@@ -139,11 +281,11 @@ export class CredentialsViewProvider implements vscode.WebviewViewProvider {
             const existing = await this.credentialManager.getAzureCredentials();
             let apiKeyToSave = creds.apiKey;
 
-            // If API key is masked/unchanged, use existing
-            if (creds.apiKey === '••••••••' || !creds.apiKey) {
+            // Only preserve existing API key if changeApiKey is false
+            if (!creds.changeApiKey) {
                 if (existing) {
                     apiKeyToSave = existing.apiKey;
-                } else {
+                } else if (creds.apiKey === '••••••••' || !creds.apiKey) {
                     throw new Error('API Key is required');
                 }
             }
@@ -190,14 +332,24 @@ export class CredentialsViewProvider implements vscode.WebviewViewProvider {
 
             let updated: NvidiaCredentials[];
             if (data.isEdit && data.editIndex >= 0) {
-                // Update existing
+                // Update existing - preserve API key if not changed
                 updated = [...existing];
+                const existingApiKey = updated[data.editIndex].apiKey;
+
+                // Preserve existing API key if the user didn't change it (masked value or empty)
+                let apiKeyToSave = data.apiKey;
+                if (!apiKeyToSave || apiKeyToSave === '••••••••') {
+                    apiKeyToSave = existingApiKey || '';
+                }
+
                 updated[data.editIndex] = {
                     endpoint: data.endpoint,
                     modelName: data.modelName,
                     providerName: data.providerName,
+                    apiKey: apiKeyToSave,
                     maxTokens: data.maxTokens,
-                    temperature: data.temperature
+                    temperature: data.temperature,
+                    topP: data.topP
                 };
             } else {
                 // Add new
@@ -205,8 +357,10 @@ export class CredentialsViewProvider implements vscode.WebviewViewProvider {
                     endpoint: data.endpoint,
                     modelName: data.modelName,
                     providerName: data.providerName,
+                    apiKey: data.apiKey,
                     maxTokens: data.maxTokens,
-                    temperature: data.temperature
+                    temperature: data.temperature,
+                    topP: data.topP
                 }];
             }
 
@@ -327,6 +481,103 @@ export class CredentialsViewProvider implements vscode.WebviewViewProvider {
         } catch (error: any) {
             Logger.error('Failed to reset system prompt', error);
             vscode.window.showErrorMessage(`Failed to reset system prompt: ${error.message}`);
+        }
+    }
+
+    /**
+     * Save Anthropic Foundry credentials
+     */
+    private async saveAnthropicCredentials(creds: any): Promise<void> {
+        try {
+            Logger.log('Saving Anthropic Foundry credentials from webview...');
+
+            // Get existing credentials to preserve API key if not changed
+            const existing = await this.credentialManager.getAnthropicFoundryCredentials();
+            let apiKeyToSave = creds.apiKey;
+
+            // Only preserve existing API key if changeApiKey is false
+            if (!creds.changeApiKey) {
+                if (existing) {
+                    apiKeyToSave = existing.apiKey;
+                } else if (creds.apiKey === '••••••••' || !creds.apiKey) {
+                    throw new Error('API Key is required');
+                }
+            }
+
+            // Store credentials
+            await this.credentialManager.configureAnthropicFoundryCredentials({
+                endpoint: creds.endpoint,
+                apiKey: apiKeyToSave,
+                deploymentName: creds.deploymentName,
+                maxTokens: creds.maxTokens,
+                temperature: creds.temperature
+            });
+
+            this.sendMessage({
+                type: 'credentialsSaved',
+                success: true,
+                provider: 'anthropic-foundry'
+            });
+
+            vscode.window.showInformationMessage('Anthropic Foundry credentials saved successfully!');
+            await this.loadState();
+        } catch (error: any) {
+            Logger.error('Failed to save Anthropic Foundry credentials', error);
+            this.sendMessage({
+                type: 'credentialsSaved',
+                success: false,
+                error: error.message,
+                provider: 'anthropic-foundry'
+            });
+            vscode.window.showErrorMessage(`Failed to save credentials: ${error.message}`);
+        }
+    }
+
+    /**
+     * Save Z.AI credentials
+     */
+    private async saveZaiCredentials(creds: any): Promise<void> {
+        try {
+            Logger.log('Saving Z.AI credentials from webview...');
+
+            // Get existing credentials to preserve API key if not changed
+            const existing = await this.credentialManager.getZaiCredentials();
+            let apiKeyToSave = creds.apiKey;
+
+            // Only preserve existing API key if changeApiKey is false
+            if (!creds.changeApiKey) {
+                if (existing) {
+                    apiKeyToSave = existing.apiKey;
+                } else if (creds.apiKey === '••••••••' || !creds.apiKey) {
+                    throw new Error('API Key is required');
+                }
+            }
+
+            // Store credentials
+            await this.credentialManager.configureZaiCredentials({
+                apiKey: apiKeyToSave,
+                modelName: creds.modelName,
+                maxTokens: creds.maxTokens,
+                temperature: creds.temperature
+            });
+
+            this.sendMessage({
+                type: 'credentialsSaved',
+                success: true,
+                provider: 'zai'
+            });
+
+            vscode.window.showInformationMessage('Z.AI credentials saved successfully!');
+            await this.loadState();
+        } catch (error: any) {
+            Logger.error('Failed to save Z.AI credentials', error);
+            this.sendMessage({
+                type: 'credentialsSaved',
+                success: false,
+                error: error.message,
+                provider: 'zai'
+            });
+            vscode.window.showErrorMessage(`Failed to save credentials: ${error.message}`);
         }
     }
 
@@ -566,6 +817,51 @@ export class CredentialsViewProvider implements vscode.WebviewViewProvider {
             color: var(--vscode-foreground);
             word-break: break-all;
             font-family: var(--vscode-editor-font-family);
+            margin-bottom: 8px;
+        }
+
+        .workspace-mode-badge {
+            display: inline-block;
+            padding: 2px 8px;
+            border-radius: 3px;
+            font-size: 10px;
+            font-weight: 600;
+            margin-bottom: 8px;
+            background: var(--vscode-button-secondaryBackground);
+            color: var(--vscode-button-secondaryForeground);
+        }
+
+        .workspace-input-group {
+            margin-top: 8px;
+        }
+
+        .workspace-input {
+            width: 100%;
+            padding: 6px;
+            background-color: var(--vscode-input-background);
+            color: var(--vscode-input-foreground);
+            border: 1px solid var(--vscode-input-border);
+            border-radius: 4px;
+            font-family: var(--vscode-font-family);
+            font-size: 12px;
+            margin-bottom: 6px;
+            box-sizing: border-box;
+        }
+
+        .workspace-actions {
+            display: flex;
+            gap: 6px;
+            margin-top: 6px;
+        }
+
+        .workspace-actions button {
+            flex: 1;
+            padding: 6px 12px;
+            font-size: 11px;
+        }
+
+        .hidden {
+            display: none !important;
         }
     </style>
 </head>
@@ -574,12 +870,23 @@ export class CredentialsViewProvider implements vscode.WebviewViewProvider {
 
     <div class="workspace-info">
         <div class="workspace-info-label">WORKSPACE DIRECTORY</div>
+        <div class="workspace-mode-badge" id="workspaceMode">Detecting...</div>
         <div class="workspace-info-path" id="workspacePath">Loading...</div>
+
+        <div class="workspace-input-group">
+            <input type="text" id="customWorkspaceInput" class="workspace-input hidden" placeholder="/path/to/workspace or ~/path/to/workspace">
+            <div class="workspace-actions">
+                <button id="setCustomWorkspaceBtn" class="secondary hidden">Set Custom Workspace</button>
+                <button id="clearCustomWorkspaceBtn" class="secondary hidden">Use Auto-Detect</button>
+            </div>
+        </div>
     </div>
 
     <div class="provider-switch">
         <button id="azureProviderBtn" class="provider-button">Azure OpenAI</button>
         <button id="nvidiaProviderBtn" class="provider-button">NVIDIA (Local)</button>
+        <button id="anthropicProviderBtn" class="provider-button">Anthropic Foundry</button>
+        <button id="zaiProviderBtn" class="provider-button">Z.AI (GLM)</button>
     </div>
 
     <div id="status" class="status not-configured">
@@ -596,8 +903,12 @@ export class CredentialsViewProvider implements vscode.WebviewViewProvider {
 
         <div class="form-group">
             <label for="azureApiKey">API Key</label>
-            <input type="password" id="azureApiKey" placeholder="Enter API key">
-            <div class="input-hint">Leave unchanged to keep existing key</div>
+            <div style="display: flex; gap: 8px; margin-bottom: 4px;">
+                <input type="checkbox" id="azureChangeApiKey" style="width: auto; margin: 0;">
+                <label for="azureChangeApiKey" style="margin: 0; font-size: 12px;">Change API Key</label>
+            </div>
+            <input type="password" id="azureApiKey" placeholder="Enter API key" disabled>
+            <div class="input-hint">Check "Change API Key" to enter a new key</div>
         </div>
 
         <div class="form-group">
@@ -644,37 +955,125 @@ export class CredentialsViewProvider implements vscode.WebviewViewProvider {
 
             <div class="form-group">
                 <label for="nvidiaProviderName">Model Name (Label)</label>
-                <input type="text" id="nvidiaProviderName" placeholder="e.g., Nemotron, OCR Model">
+                <input type="text" id="nvidiaProviderName" placeholder="e.g., Nemotron, OCR Model, Online NVIDIA">
                 <div class="input-hint">A friendly name to identify this model</div>
             </div>
 
             <div class="form-group">
                 <label for="nvidiaEndpoint">Endpoint URL</label>
-                <input type="text" id="nvidiaEndpoint" placeholder="http://10.33.11.12:8012/v1">
+                <input type="text" id="nvidiaEndpoint" placeholder="e.g., http://10.33.11.12:8012/v1 or https://integrate.api.nvidia.com/v1">
                 <div class="input-hint">The API endpoint (will append /chat/completions if needed)</div>
             </div>
 
             <div class="form-group">
+                <label for="nvidiaApiKey">API Key (Optional - for online NVIDIA API)</label>
+                <input type="password" id="nvidiaApiKey" placeholder="nvapi-...">
+                <div class="input-hint">Required for https://integrate.api.nvidia.com, leave empty for local endpoints</div>
+            </div>
+
+            <div class="form-group">
                 <label for="nvidiaModelName">Model Name</label>
-                <input type="text" id="nvidiaModelName" placeholder="e.g., nemotron-3-nano-30b">
+                <input type="text" id="nvidiaModelName" placeholder="e.g., nemotron-3-nano-30b, stepfun-ai/step-3.5-flash">
                 <div class="input-hint">The model identifier</div>
             </div>
 
             <div class="form-group">
                 <label for="nvidiaMaxTokens">Max Tokens (Optional)</label>
-                <input type="number" id="nvidiaMaxTokens" placeholder="Leave empty for backend default">
+                <input type="number" id="nvidiaMaxTokens" placeholder="e.g., 16384">
                 <div class="input-hint">Maximum tokens in response. Leave empty for model default</div>
             </div>
 
             <div class="form-group">
                 <label for="nvidiaTemperature">Temperature (Optional)</label>
-                <input type="number" id="nvidiaTemperature" step="0.1" min="0" max="2" placeholder="Leave empty for backend default">
+                <input type="number" id="nvidiaTemperature" step="0.1" min="0" max="2" placeholder="e.g., 1.0">
                 <div class="input-hint">Response randomness (0.0 - 2.0). Leave empty for model default</div>
+            </div>
+
+            <div class="form-group">
+                <label for="nvidiaTopP">Top P (Optional)</label>
+                <input type="number" id="nvidiaTopP" step="0.05" min="0" max="1" placeholder="e.g., 0.9">
+                <div class="input-hint">Nucleus sampling (0.0 - 1.0). Leave empty for model default</div>
             </div>
 
             <div class="button-group">
                 <button id="addNvidiaButton">Add NVIDIA Model</button>
             </div>
+        </div>
+    </div>
+
+    <!-- Anthropic Foundry Credentials Form -->
+    <div id="anthropicForm" class="hidden">
+        <div class="form-group">
+            <label for="anthropicEndpoint">Endpoint URL</label>
+            <input type="text" id="anthropicEndpoint" placeholder="https://<your-resource>.openai.azure.com/anthropic">
+            <div class="input-hint">Your Anthropic Foundry endpoint (Azure-hosted Claude)</div>
+        </div>
+
+        <div class="form-group">
+            <label for="anthropicApiKey">API Key</label>
+            <div style="display: flex; gap: 8px; margin-bottom: 4px;">
+                <input type="checkbox" id="anthropicChangeApiKey" style="width: auto; margin: 0;">
+                <label for="anthropicChangeApiKey" style="margin: 0; font-size: 12px;">Change API Key</label>
+            </div>
+            <input type="password" id="anthropicApiKey" placeholder="Enter API key" disabled>
+            <div class="input-hint">Check "Change API Key" to enter a new key</div>
+        </div>
+
+        <div class="form-group">
+            <label for="anthropicDeploymentName">Deployment Name</label>
+            <input type="text" id="anthropicDeploymentName" placeholder="e.g., claude-opus-4_5-dev">
+            <div class="input-hint">The name of your Claude deployment</div>
+        </div>
+
+        <div class="form-group">
+            <label for="anthropicMaxTokens">Max Tokens (Optional)</label>
+            <input type="number" id="anthropicMaxTokens" placeholder="4096">
+            <div class="input-hint">Maximum tokens in response. Leave empty for default</div>
+        </div>
+
+        <div class="form-group">
+            <label for="anthropicTemperature">Temperature (Optional)</label>
+            <input type="number" id="anthropicTemperature" step="0.1" min="0" max="2" placeholder="0.7">
+            <div class="input-hint">Response randomness (0.0 - 2.0). Leave empty for default</div>
+        </div>
+
+        <div class="button-group">
+            <button id="saveAnthropicButton">Save Anthropic Credentials</button>
+        </div>
+    </div>
+
+    <!-- Z.AI Credentials Form -->
+    <div id="zaiForm" class="hidden">
+        <div class="form-group">
+            <label for="zaiApiKey">API Key</label>
+            <div style="display: flex; gap: 8px; margin-bottom: 4px;">
+                <input type="checkbox" id="zaiChangeApiKey" style="width: auto; margin: 0;">
+                <label for="zaiChangeApiKey" style="margin: 0; font-size: 12px;">Change API Key</label>
+            </div>
+            <input type="password" id="zaiApiKey" placeholder="Enter API key" disabled>
+            <div class="input-hint">Check "Change API Key" to enter a new key</div>
+        </div>
+
+        <div class="form-group">
+            <label for="zaiModelName">Model Name</label>
+            <input type="text" id="zaiModelName" placeholder="e.g., glm-4.7, glm-4-plus">
+            <div class="input-hint">The Z.AI model identifier</div>
+        </div>
+
+        <div class="form-group">
+            <label for="zaiMaxTokens">Max Tokens (Optional)</label>
+            <input type="number" id="zaiMaxTokens" placeholder="4096">
+            <div class="input-hint">Maximum tokens in response. Leave empty for default</div>
+        </div>
+
+        <div class="form-group">
+            <label for="zaiTemperature">Temperature (Optional)</label>
+            <input type="number" id="zaiTemperature" step="0.1" min="0" max="2" placeholder="1.0">
+            <div class="input-hint">Response randomness (0.0 - 2.0). Leave empty for default</div>
+        </div>
+
+        <div class="button-group">
+            <button id="saveZaiButton">Save Z.AI Credentials</button>
         </div>
     </div>
 
@@ -714,7 +1113,9 @@ export class CredentialsViewProvider implements vscode.WebviewViewProvider {
             provider: 'azure',
             azure: null,
             nvidia: [],
-            selectedNvidiaModel: null
+            selectedNvidiaModel: null,
+            anthropic: null,
+            zai: null
         };
 
         // Provider switching
@@ -726,18 +1127,42 @@ export class CredentialsViewProvider implements vscode.WebviewViewProvider {
             switchProvider('nvidia');
         });
 
+        document.getElementById('anthropicProviderBtn').addEventListener('click', () => {
+            switchProvider('anthropic-foundry');
+        });
+
+        document.getElementById('zaiProviderBtn').addEventListener('click', () => {
+            switchProvider('zai');
+        });
+
         function switchProvider(provider) {
             vscode.postMessage({ type: 'switchProvider', provider });
         }
 
+        // Azure API Key checkbox handler
+        document.getElementById('azureChangeApiKey').addEventListener('change', (e) => {
+            const apiKeyInput = document.getElementById('azureApiKey');
+            const checkbox = e.target;
+            apiKeyInput.disabled = !checkbox.checked;
+            if (checkbox.checked) {
+                apiKeyInput.placeholder = 'Enter new API key';
+                apiKeyInput.value = '';
+            } else {
+                apiKeyInput.placeholder = 'Enter API key';
+                apiKeyInput.value = '••••••••';
+            }
+        });
+
         // Save Azure credentials
         document.getElementById('saveAzureButton').addEventListener('click', () => {
+            const changeApiKey = document.getElementById('azureChangeApiKey').checked;
             const credentials = {
                 endpoint: document.getElementById('azureEndpoint').value.trim(),
-                apiKey: document.getElementById('azureApiKey').value.trim(),
+                apiKey: changeApiKey ? document.getElementById('azureApiKey').value.trim() : '••••••••',
                 deploymentName: document.getElementById('azureDeploymentName').value.trim(),
                 apiVersion: document.getElementById('azureApiVersion').value.trim(),
-                modelName: document.getElementById('azureModelName').value.trim()
+                modelName: document.getElementById('azureModelName').value.trim(),
+                changeApiKey: changeApiKey
             };
 
             // Add optional fields if provided
@@ -756,6 +1181,11 @@ export class CredentialsViewProvider implements vscode.WebviewViewProvider {
                 return;
             }
 
+            if (changeApiKey && !credentials.apiKey) {
+                alert('Please enter a new API Key or uncheck "Change API Key"');
+                return;
+            }
+
             vscode.postMessage({
                 type: 'saveAzureCredentials',
                 credentials
@@ -768,6 +1198,7 @@ export class CredentialsViewProvider implements vscode.WebviewViewProvider {
                 providerName: document.getElementById('nvidiaProviderName').value.trim(),
                 endpoint: document.getElementById('nvidiaEndpoint').value.trim(),
                 modelName: document.getElementById('nvidiaModelName').value.trim(),
+                apiKey: document.getElementById('nvidiaApiKey').value.trim(),
                 isEdit: false,
                 editIndex: -1
             };
@@ -783,8 +1214,13 @@ export class CredentialsViewProvider implements vscode.WebviewViewProvider {
                 credentials.temperature = parseFloat(temperature);
             }
 
+            const topP = document.getElementById('nvidiaTopP').value.trim();
+            if (topP) {
+                credentials.topP = parseFloat(topP);
+            }
+
             if (!credentials.providerName || !credentials.endpoint || !credentials.modelName) {
-                alert('All fields are required');
+                alert('Model Name (Label), Endpoint URL, and Model Name are required');
                 return;
             }
 
@@ -796,9 +1232,112 @@ export class CredentialsViewProvider implements vscode.WebviewViewProvider {
             // Clear form
             document.getElementById('nvidiaProviderName').value = '';
             document.getElementById('nvidiaEndpoint').value = '';
+            document.getElementById('nvidiaApiKey').value = '';
             document.getElementById('nvidiaModelName').value = '';
             document.getElementById('nvidiaMaxTokens').value = '';
             document.getElementById('nvidiaTemperature').value = '';
+            document.getElementById('nvidiaTopP').value = '';
+        });
+
+        // Anthropic API Key checkbox handler
+        document.getElementById('anthropicChangeApiKey').addEventListener('change', (e) => {
+            const apiKeyInput = document.getElementById('anthropicApiKey');
+            const checkbox = e.target;
+            apiKeyInput.disabled = !checkbox.checked;
+            if (checkbox.checked) {
+                apiKeyInput.placeholder = 'Enter new API key';
+                apiKeyInput.value = '';
+            } else {
+                apiKeyInput.placeholder = 'Enter API key';
+                apiKeyInput.value = '••••••••';
+            }
+        });
+
+        // Save Anthropic Foundry credentials
+        document.getElementById('saveAnthropicButton').addEventListener('click', () => {
+            const changeApiKey = document.getElementById('anthropicChangeApiKey').checked;
+            const credentials = {
+                endpoint: document.getElementById('anthropicEndpoint').value.trim(),
+                apiKey: changeApiKey ? document.getElementById('anthropicApiKey').value.trim() : '••••••••',
+                deploymentName: document.getElementById('anthropicDeploymentName').value.trim(),
+                changeApiKey: changeApiKey
+            };
+
+            // Add optional fields if provided
+            const maxTokens = document.getElementById('anthropicMaxTokens').value.trim();
+            if (maxTokens) {
+                credentials.maxTokens = parseInt(maxTokens, 10);
+            }
+
+            const temperature = document.getElementById('anthropicTemperature').value.trim();
+            if (temperature) {
+                credentials.temperature = parseFloat(temperature);
+            }
+
+            if (!credentials.endpoint || !credentials.deploymentName) {
+                alert('Endpoint and Deployment Name are required');
+                return;
+            }
+
+            if (changeApiKey && !credentials.apiKey) {
+                alert('Please enter a new API Key or uncheck "Change API Key"');
+                return;
+            }
+
+            vscode.postMessage({
+                type: 'saveAnthropicCredentials',
+                credentials
+            });
+        });
+
+        // Z.AI API Key checkbox handler
+        document.getElementById('zaiChangeApiKey').addEventListener('change', (e) => {
+            const apiKeyInput = document.getElementById('zaiApiKey');
+            const checkbox = e.target;
+            apiKeyInput.disabled = !checkbox.checked;
+            if (checkbox.checked) {
+                apiKeyInput.placeholder = 'Enter new API key';
+                apiKeyInput.value = '';
+            } else {
+                apiKeyInput.placeholder = 'Enter API key';
+                apiKeyInput.value = '••••••••';
+            }
+        });
+
+        // Save Z.AI credentials
+        document.getElementById('saveZaiButton').addEventListener('click', () => {
+            const changeApiKey = document.getElementById('zaiChangeApiKey').checked;
+            const credentials = {
+                apiKey: changeApiKey ? document.getElementById('zaiApiKey').value.trim() : '••••••••',
+                modelName: document.getElementById('zaiModelName').value.trim(),
+                changeApiKey: changeApiKey
+            };
+
+            // Add optional fields if provided
+            const maxTokens = document.getElementById('zaiMaxTokens').value.trim();
+            if (maxTokens) {
+                credentials.maxTokens = parseInt(maxTokens, 10);
+            }
+
+            const temperature = document.getElementById('zaiTemperature').value.trim();
+            if (temperature) {
+                credentials.temperature = parseFloat(temperature);
+            }
+
+            if (!credentials.modelName) {
+                alert('Model Name is required');
+                return;
+            }
+
+            if (changeApiKey && !credentials.apiKey) {
+                alert('Please enter a new API Key or uncheck "Change API Key"');
+                return;
+            }
+
+            vscode.postMessage({
+                type: 'saveZaiCredentials',
+                credentials
+            });
         });
 
         // View logs
@@ -821,6 +1360,22 @@ export class CredentialsViewProvider implements vscode.WebviewViewProvider {
             }
         });
 
+        // Workspace configuration
+        document.getElementById('setCustomWorkspaceBtn').addEventListener('click', () => {
+            const path = document.getElementById('customWorkspaceInput').value.trim();
+            if (!path) {
+                alert('Please enter a workspace path');
+                return;
+            }
+            vscode.postMessage({ type: 'setCustomWorkspace', path });
+        });
+
+        document.getElementById('clearCustomWorkspaceBtn').addEventListener('click', () => {
+            if (confirm('Switch back to auto-detect mode? The custom workspace path will be cleared.')) {
+                vscode.postMessage({ type: 'clearCustomWorkspace' });
+            }
+        });
+
         // Handle messages from extension
         window.addEventListener('message', (event) => {
             const message = event.data;
@@ -832,6 +1387,17 @@ export class CredentialsViewProvider implements vscode.WebviewViewProvider {
                     break;
                 case 'workspaceInfo':
                     document.getElementById('workspacePath').textContent = message.workspacePath;
+                    break;
+                case 'workspaceConfigLoaded':
+                    renderWorkspaceConfig(message.config);
+                    break;
+                case 'workspaceSaved':
+                    if (message.success) {
+                        // Refresh workspace config after save
+                        vscode.postMessage({ type: 'getWorkspaceConfig' });
+                    } else {
+                        alert('Failed to save workspace: ' + message.error);
+                    }
                     break;
                 case 'credentialsSaved':
                     if (message.success) {
@@ -856,15 +1422,24 @@ export class CredentialsViewProvider implements vscode.WebviewViewProvider {
             // Update provider buttons
             document.getElementById('azureProviderBtn').classList.toggle('active', currentState.provider === 'azure');
             document.getElementById('nvidiaProviderBtn').classList.toggle('active', currentState.provider === 'nvidia');
+            document.getElementById('anthropicProviderBtn').classList.toggle('active', currentState.provider === 'anthropic-foundry');
+            document.getElementById('zaiProviderBtn').classList.toggle('active', currentState.provider === 'zai');
 
             // Update status
             const statusEl = document.getElementById('status');
             const isConfigured = currentState.provider === 'azure'
                 ? currentState.azure !== null
-                : currentState.nvidia.length > 0;
+                : currentState.provider === 'nvidia'
+                ? currentState.nvidia.length > 0
+                : currentState.provider === 'anthropic-foundry'
+                ? currentState.anthropic !== null
+                : currentState.zai !== null;
 
             if (isConfigured) {
-                statusEl.textContent = '✓ ' + (currentState.provider === 'azure' ? 'Azure Configured' : currentState.nvidia.length + ' NVIDIA Model(s)');
+                const providerName = currentState.provider === 'azure' ? 'Azure' :
+                                   currentState.provider === 'nvidia' ? currentState.nvidia.length + ' NVIDIA Model(s)' :
+                                   currentState.provider === 'anthropic-foundry' ? 'Anthropic Foundry' : 'Z.AI';
+                statusEl.textContent = '✓ ' + providerName + ' Configured';
                 statusEl.className = 'status configured';
             } else {
                 statusEl.textContent = '✗ Not Configured';
@@ -874,16 +1449,44 @@ export class CredentialsViewProvider implements vscode.WebviewViewProvider {
             // Show/hide forms
             document.getElementById('azureForm').classList.toggle('hidden', currentState.provider !== 'azure');
             document.getElementById('nvidiaForm').classList.toggle('hidden', currentState.provider !== 'nvidia');
+            document.getElementById('anthropicForm').classList.toggle('hidden', currentState.provider !== 'anthropic-foundry');
+            document.getElementById('zaiForm').classList.toggle('hidden', currentState.provider !== 'zai');
 
             // Populate Azure form
             if (currentState.azure) {
                 document.getElementById('azureEndpoint').value = currentState.azure.endpoint || '';
-                document.getElementById('azureApiKey').value = currentState.azure.apiKey || '';
+                document.getElementById('azureApiKey').value = currentState.azure.apiKey || '••••••••';
                 document.getElementById('azureDeploymentName').value = currentState.azure.deploymentName || '';
                 document.getElementById('azureApiVersion').value = currentState.azure.apiVersion || '';
                 document.getElementById('azureModelName').value = currentState.azure.modelName || '';
                 document.getElementById('azureMaxTokens').value = currentState.azure.maxTokens || '';
                 document.getElementById('azureTemperature').value = currentState.azure.temperature || '';
+                // Initialize checkbox - unchecked by default (keep existing key)
+                document.getElementById('azureChangeApiKey').checked = false;
+                document.getElementById('azureApiKey').disabled = true;
+            }
+
+            // Populate Anthropic Foundry form
+            if (currentState.anthropic) {
+                document.getElementById('anthropicEndpoint').value = currentState.anthropic.endpoint || '';
+                document.getElementById('anthropicApiKey').value = currentState.anthropic.apiKey || '••••••••';
+                document.getElementById('anthropicDeploymentName').value = currentState.anthropic.deploymentName || '';
+                document.getElementById('anthropicMaxTokens').value = currentState.anthropic.maxTokens || '';
+                document.getElementById('anthropicTemperature').value = currentState.anthropic.temperature || '';
+                // Initialize checkbox - unchecked by default (keep existing key)
+                document.getElementById('anthropicChangeApiKey').checked = false;
+                document.getElementById('anthropicApiKey').disabled = true;
+            }
+
+            // Populate Z.AI form
+            if (currentState.zai) {
+                document.getElementById('zaiApiKey').value = currentState.zai.apiKey || '••••••••';
+                document.getElementById('zaiModelName').value = currentState.zai.modelName || '';
+                document.getElementById('zaiMaxTokens').value = currentState.zai.maxTokens || '';
+                document.getElementById('zaiTemperature').value = currentState.zai.temperature || '';
+                // Initialize checkbox - unchecked by default (keep existing key)
+                document.getElementById('zaiChangeApiKey').checked = false;
+                document.getElementById('zaiApiKey').disabled = true;
             }
 
             // Render NVIDIA models list
@@ -910,8 +1513,10 @@ export class CredentialsViewProvider implements vscode.WebviewViewProvider {
                     <div class="nvidia-model-details">
                         <div>Endpoint: \${escapeHtml(model.endpoint)}</div>
                         <div>Model: \${escapeHtml(model.modelName)}</div>
-                        \${model.maxTokens ? '<div>Max Tokens: ' + escapeHtml(model.maxTokens) + '</div>' : ''}
-                        \${model.temperature ? '<div>Temperature: ' + escapeHtml(model.temperature) + '</div>' : ''}
+                        \${model.apiKey ? '<div>API Key: ••••••••</div>' : ''}
+                        \${model.maxTokens !== undefined && model.maxTokens !== '' ? '<div>Max Tokens: ' + escapeHtml(model.maxTokens) + '</div>' : ''}
+                        \${model.temperature !== undefined && model.temperature !== '' ? '<div>Temperature: ' + escapeHtml(model.temperature) + '</div>' : ''}
+                        \${model.topP !== undefined && model.topP !== '' ? '<div>Top P: ' + escapeHtml(model.topP) + '</div>' : ''}
                     </div>
                 \`;
                 container.appendChild(div);
@@ -936,9 +1541,33 @@ export class CredentialsViewProvider implements vscode.WebviewViewProvider {
             return div.innerHTML;
         }
 
+        function renderWorkspaceConfig(config) {
+            const modeBadge = document.getElementById('workspaceMode');
+            const customInput = document.getElementById('customWorkspaceInput');
+            const setBtn = document.getElementById('setCustomWorkspaceBtn');
+            const clearBtn = document.getElementById('clearCustomWorkspaceBtn');
+
+            // Always show the actual workspace path being used
+            document.getElementById('workspacePath').textContent = config.actualWorkspacePath || 'Unknown';
+
+            if (config.useAutoDetect) {
+                modeBadge.textContent = 'Auto-Detect';
+                customInput.classList.add('hidden');
+                setBtn.classList.add('hidden');
+                clearBtn.classList.add('hidden');
+            } else {
+                modeBadge.textContent = 'Custom Workspace';
+                customInput.classList.remove('hidden');
+                setBtn.classList.remove('hidden');
+                clearBtn.classList.remove('hidden');
+                customInput.value = config.customWorkspacePath || '';
+            }
+        }
+
         // Request initial state
         vscode.postMessage({ type: 'loadState' });
         vscode.postMessage({ type: 'getWorkspaceInfo' });
+        vscode.postMessage({ type: 'getWorkspaceConfig' });
     </script>
 </body>
 </html>`;

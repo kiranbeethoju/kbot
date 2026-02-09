@@ -7,6 +7,9 @@ import * as vscode from 'vscode';
 import { CredentialManager } from './credentials';
 import { AzureGPTService } from './azureGPT';
 import { NvidiaService } from './nvidiaService';
+import { AnthropicFoundryService } from './anthropicFoundryService';
+import { ZaiService } from './zaiService';
+import { StructuredEditManager, FileStructuredEdit } from './structuredEditManager';
 import { FileManager } from './fileManager';
 import { BackupManager } from './backupManager';
 import { ExclusionManager } from './exclusionManager';
@@ -14,6 +17,7 @@ import { GitManager, GitChange } from './gitManager';
 import { ChatHistoryManager, ChatSession } from './chatHistory';
 import { TerminalManager } from './terminalManager';
 import { ChatMessage, ProviderType } from './types';
+import { FileStructuredEdit } from './structuredEditManager';
 import { Logger } from './logger';
 
 export interface ChatMessageEntry {
@@ -23,6 +27,8 @@ export interface ChatMessageEntry {
     timestamp: number;
     files?: Array<{ path: string; action: string; content: string; originalContent?: string }>;
     gitCommitted?: boolean;
+    shell?: string;  // Shell command that was executed
+    shellOutput?: string;  // Output from shell command
 }
 
 export class ChatPanelProvider implements vscode.WebviewViewProvider {
@@ -32,12 +38,15 @@ export class ChatPanelProvider implements vscode.WebviewViewProvider {
     private terminalManager: TerminalManager;
     private currentSession: ChatSession | null = null;
     private abortController: AbortController | null = null;
+    private structuredEditManager?: StructuredEditManager;
 
     constructor(
         private extensionUri: vscode.Uri,
         private credentialManager: CredentialManager,
         private azureGPTService: AzureGPTService,
         private nvidiaService: NvidiaService,
+        private anthropicFoundryService: AnthropicFoundryService,
+        private zaiService: ZaiService,
         private fileManager: FileManager,
         private backupManager: BackupManager,
         private exclusionManager: ExclusionManager,
@@ -47,6 +56,12 @@ export class ChatPanelProvider implements vscode.WebviewViewProvider {
     ) {
         this.chatHistoryManager = chatHistoryManager;
         this.terminalManager = terminalManager;
+
+        // Initialize structured edit manager with workspace root
+        const workspaceFolders = vscode.workspace.workspaceFolders;
+        if (workspaceFolders && workspaceFolders.length > 0) {
+            this.structuredEditManager = new StructuredEditManager(workspaceFolders[0].uri.fsPath);
+        }
     }
 
     /**
@@ -211,7 +226,7 @@ export class ChatPanelProvider implements vscode.WebviewViewProvider {
                 message
             });
         }
-        
+
         this.messagesLoaded = true;
     }
 
@@ -235,7 +250,9 @@ export class ChatPanelProvider implements vscode.WebviewViewProvider {
         const isConfigured = await this.credentialManager.isConfigured();
 
         if (!isConfigured) {
-            const providerName = provider === ProviderType.Azure ? 'Azure' : 'NVIDIA';
+            const providerName = provider === ProviderType.Azure ? 'Azure' :
+                                provider === ProviderType.NVIDIA ? 'NVIDIA' :
+                                provider === ProviderType.AnthropicFoundry ? 'Anthropic Foundry' : 'Z.AI';
             this.sendMessage({
                 type: 'error',
                 message: `${providerName} credentials not configured. Please configure them first.`
@@ -262,9 +279,12 @@ export class ChatPanelProvider implements vscode.WebviewViewProvider {
         });
 
         // Show loading indicator
+        const providerShortName = provider === ProviderType.Azure ? 'Azure' :
+                                provider === ProviderType.NVIDIA ? 'NVIDIA' :
+                                provider === ProviderType.AnthropicFoundry ? 'Claude' : 'Z.AI';
         this.sendMessage({
             type: 'loadingStarted',
-            message: `Thinking with ${provider === ProviderType.Azure ? 'Azure' : 'NVIDIA'}...`
+            message: `Thinking with ${providerShortName}...`
         });
 
         try {
@@ -293,7 +313,7 @@ export class ChatPanelProvider implements vscode.WebviewViewProvider {
             let workspaceFiles: any[] = [];
             try {
                 workspaceFiles = await this.fileManager.getWorkspaceFiles();
-                
+
                 // Log workspace file count for debugging
                 if (workspaceFiles.length > 0) {
                     Logger.log(`Auto-including ${workspaceFiles.length} workspace files from ${this.fileManager.getWorkspaceRoot()}`);
@@ -341,17 +361,39 @@ export class ChatPanelProvider implements vscode.WebviewViewProvider {
             }
 
             // Build messages array
-            const systemPrompt = provider === ProviderType.Azure
-                ? await this.azureGPTService.generateSystemPrompt({
-                    fileCount: fileContexts.length,
-                    includeGitDiff: context.includeGitDiff || false,
-                    includeTerminal: context.includeTerminal || false
-                })
-                : await this.nvidiaService.generateSystemPrompt({
-                    fileCount: fileContexts.length,
-                    includeGitDiff: context.includeGitDiff || false,
-                    includeTerminal: context.includeTerminal || false
-                });
+            let systemPrompt: string;
+            switch (provider) {
+                case ProviderType.Azure:
+                    systemPrompt = await this.azureGPTService.generateSystemPrompt({
+                        fileCount: fileContexts.length,
+                        includeGitDiff: context.includeGitDiff || false,
+                        includeTerminal: context.includeTerminal || false
+                    });
+                    break;
+                case ProviderType.NVIDIA:
+                    systemPrompt = await this.nvidiaService.generateSystemPrompt({
+                        fileCount: fileContexts.length,
+                        includeGitDiff: context.includeGitDiff || false,
+                        includeTerminal: context.includeTerminal || false
+                    });
+                    break;
+                case ProviderType.AnthropicFoundry:
+                    systemPrompt = await this.anthropicFoundryService.generateSystemPrompt({
+                        fileCount: fileContexts.length,
+                        includeGitDiff: context.includeGitDiff || false,
+                        includeTerminal: context.includeTerminal || false
+                    });
+                    break;
+                case ProviderType.Zai:
+                    systemPrompt = await this.zaiService.generateSystemPrompt({
+                        fileCount: fileContexts.length,
+                        includeGitDiff: context.includeGitDiff || false,
+                        includeTerminal: context.includeTerminal || false
+                    });
+                    break;
+                default:
+                    systemPrompt = await this.credentialManager.getSystemPrompt();
+            }
 
             const messages: ChatMessage[] = [
                 {
@@ -425,9 +467,12 @@ ${gitDiffContent}${terminalContent}
             let response: string;
 
             // Send progress update
+            const providerName = provider === ProviderType.Azure ? 'Azure OpenAI' :
+                                provider === ProviderType.NVIDIA ? 'NVIDIA' :
+                                provider === ProviderType.AnthropicFoundry ? 'Anthropic Foundry' : 'Z.AI';
             this.sendMessage({
                 type: 'loadingUpdate',
-                message: `Sending request to ${provider === ProviderType.Azure ? 'Azure OpenAI' : 'NVIDIA'}...`
+                message: `Sending request to ${providerName}...`
             });
 
             if (provider === ProviderType.Azure) {
@@ -446,7 +491,7 @@ ${gitDiffContent}${terminalContent}
                     },
                     this.abortController.signal
                 );
-            } else {
+            } else if (provider === ProviderType.NVIDIA) {
                 // Set credentials for NVIDIA service
                 const nvidiaCreds = await this.credentialManager.getNvidiaCredentials();
                 if (!nvidiaCreds) {
@@ -463,6 +508,40 @@ ${gitDiffContent}${terminalContent}
                     },
                     this.abortController.signal
                 );
+            } else if (provider === ProviderType.AnthropicFoundry) {
+                // Set credentials for Anthropic Foundry service
+                const anthropicCreds = await this.credentialManager.getAnthropicFoundryCredentials();
+                if (!anthropicCreds) {
+                    throw new Error('Anthropic Foundry credentials not found');
+                }
+                this.anthropicFoundryService.setCredentials(anthropicCreds);
+                response = await this.anthropicFoundryService.sendMessage(
+                    messages,
+                    (delta) => {
+                        this.sendMessage({
+                            type: 'messageDelta',
+                            delta
+                        });
+                    }
+                );
+            } else if (provider === ProviderType.Zai) {
+                // Set credentials for Z.AI service
+                const zaiCreds = await this.credentialManager.getZaiCredentials();
+                if (!zaiCreds) {
+                    throw new Error('Z.AI credentials not found');
+                }
+                this.zaiService.setCredentials(zaiCreds);
+                response = await this.zaiService.sendMessage(
+                    messages,
+                    (delta) => {
+                        this.sendMessage({
+                            type: 'messageDelta',
+                            delta
+                        });
+                    }
+                );
+            } else {
+                throw new Error(`Unknown provider: ${provider}`);
             }
 
             // Hide loading indicator
@@ -470,36 +549,108 @@ ${gitDiffContent}${terminalContent}
                 type: 'loadingStopped'
             });
 
-            // Signal streaming complete
-            this.sendMessage({
-                type: 'streamingComplete'
-            });
+            // Debug: Log the raw response
+            Logger.log(`=== AI Response (first 500 chars) ===`);
+            Logger.log(response.substring(0, 500));
+            Logger.log(`=== End AI Response ===`);
 
-            // Parse response
-            const structuredResponse = this.azureGPTService.parseStructuredResponse(response);
+            // Parse response - try structured edit format first
+            let structuredResponse;
+            let fileChangesToApply: any[] = [];
+
+            if (this.structuredEditManager) {
+                structuredResponse = this.structuredEditManager.parseStructuredEditResponse(response);
+                if (structuredResponse && structuredResponse.files.length > 0) {
+                    // Use structured edits
+                    fileChangesToApply = structuredResponse.files;
+                    Logger.log(`Applying ${structuredResponse.files.length} structured file edits`);
+                }
+            }
+
+            // Fallback to legacy parsing if no structured edits found
+            if (fileChangesToApply.length === 0) {
+                structuredResponse = this.azureGPTService.parseStructuredResponse(response);
+                if (structuredResponse && structuredResponse.files) {
+                    fileChangesToApply = structuredResponse.files;
+                    Logger.log(`Applying ${structuredResponse.files.length} legacy file changes`);
+                }
+            }
+
+            // Variables to store shell command execution results
+            let shellCommand: string | undefined;
+            let shellOutput: string | undefined;
+
+            // Execute shell command if present
+            if (structuredResponse.shell) {
+                shellCommand = structuredResponse.shell;
+                Logger.log(`🔧 Executing shell command: ${shellCommand}`);
+                this.sendMessage({
+                    type: 'info',
+                    message: `🔧 Executing: ${shellCommand}`
+                });
+
+                try {
+                    const { stdout, stderr } = await this.terminalManager.executeCommandSync(
+                        shellCommand,
+                        this.fileManager.getWorkspaceRoot()
+                    );
+
+                    // Log the output
+                    shellOutput = stdout.trim() || (stderr.trim() || 'Command executed with no output');
+                    Logger.log(`✓ Shell command output:\n${shellOutput}`);
+
+                    // Send output to UI
+                    this.sendMessage({
+                        type: 'shellOutput',
+                        command: shellCommand,
+                        output: shellOutput
+                    });
+
+                    // Add command output to AI context so it can use the results
+                    if (structuredResponse.explanation) {
+                        structuredResponse.explanation += `\n\n**Shell Command Executed:**\n\`${shellCommand}\`\n\n**Output:**\n\`\`\`\n${shellOutput}\n\`\`\``;
+                    }
+                } catch (error: any) {
+                    const errorMsg = error.message || 'Unknown error';
+                    shellOutput = `Error: ${errorMsg}`;
+                    Logger.error(`✗ Shell command failed: ${errorMsg}`);
+                    this.sendMessage({
+                        type: 'error',
+                        message: `Command failed: ${errorMsg}`
+                    });
+
+                    // Still let AI know about the error
+                    if (structuredResponse.explanation) {
+                        structuredResponse.explanation += `\n\n**Shell Command Failed:**\n\`${shellCommand}\`\n\n**Error:**\n${errorMsg}`;
+                    }
+                }
+            }
 
             // Enrich file changes with git status
-            if (structuredResponse.files && structuredResponse.files.length > 0) {
-                for (const file of structuredResponse.files) {
+            if (fileChangesToApply.length > 0) {
+                for (const file of fileChangesToApply) {
                     if (this.gitManager) {
-                        const originalContent = await this.gitManager.getOriginalContent(file.path);
+                        const filePath = (file as any).path || (file as any).filePath;
+                        const originalContent = await this.gitManager.getOriginalContent(filePath);
                         (file as any).originalContent = originalContent || undefined;
                     }
                 }
             }
 
-            // Signal streaming complete (this finalizes the accumulated message)
+            // Signal streaming complete (this finalizes the accumulated streamed content)
             this.sendMessage({
                 type: 'streamingComplete'
             });
 
-            // Add assistant message to history (but don't send to UI again)
+            // Add assistant message to history and send to UI
             const assistantEntry: ChatMessageEntry = {
                 id: this.generateId(),
                 role: 'assistant',
                 content: structuredResponse.explanation,
                 timestamp: Date.now(),
-                files: structuredResponse.files
+                files: fileChangesToApply,
+                shell: shellCommand,
+                shellOutput: shellOutput
             };
 
             if (this.currentSession) {
@@ -507,10 +658,16 @@ ${gitDiffContent}${terminalContent}
                 await this.chatHistoryManager.addMessage(assistantEntry);
             }
 
+            // Send the complete assistant message with files to the frontend
+            this.sendMessage({
+                type: 'messageAdded',
+                message: assistantEntry
+            });
+
             // Auto-commit changes if git is enabled
-            if (this.gitManager && structuredResponse.files && structuredResponse.files.length > 0) {
+            if (this.gitManager && fileChangesToApply.length > 0) {
                 // Commit will happen after user applies changes
-                Logger.log(`Prepared ${structuredResponse.files.length} file changes for git commit after user approval`);
+                Logger.log(`Prepared ${fileChangesToApply.length} file changes for git commit after user approval`);
             }
 
             // Clean up abort controller
@@ -536,46 +693,121 @@ ${gitDiffContent}${terminalContent}
     }
 
     /**
-     * Apply file changes
+     * Apply file changes (supports both legacy and structured format)
      */
     private async applyChanges(
-        files: Array<{ path: string; action: string; content: string }>
+        files: Array<{ path: string; action: string; content: string }> | FileStructuredEdit[]
     ): Promise<void> {
         try {
-            // Create backups
-            const filesToBackup = files
-                .filter((f) => f.action === 'update')
-                .map((f) => f.path);
+            // Check if this is the new structured format
+            const isStructured = files.length > 0 && 'edits' in (files[0] as any);
 
-            await this.backupManager.backupFiles(filesToBackup);
-
-            // Apply changes
-            await this.fileManager.applyFileChanges(files);
-
-            vscode.window.showInformationMessage(
-                `Successfully applied changes to ${files.length} file(s)`
-            );
-
-            this.sendMessage({
-                type: 'changesApplied',
-                files
-            });
-
-            // Commit to git
-            if (this.gitManager) {
-                const gitChanges: GitChange[] = files.map(f => ({
-                    path: f.path,
-                    action: f.action as 'update' | 'create' | 'delete',
-                    content: f.content
-                }));
-
-                // Find the user message that prompted these changes
-                const messages = this.currentSession?.messages || [];
-                const lastUserMessage = [...messages].reverse().find(m => m.role === 'user');
-                await this.gitManager.commitAIChanges(gitChanges, lastUserMessage?.content || 'AI changes');
+            if (isStructured) {
+                // New structured format - use StructuredEditManager
+                await this.applyStructuredEdits(files as FileStructuredEdit[]);
+            } else {
+                // Legacy format - apply old method
+                await this.applyLegacyFileChanges(files as Array<{ path: string; action: string; content: string }>);
             }
         } catch (error: any) {
             vscode.window.showErrorMessage(`Failed to apply changes: ${error.message}`);
+        }
+    }
+
+    /**
+     * Apply structured edits using StructuredEditManager
+     */
+    private async applyStructuredEdits(fileEdits: FileStructuredEdit[]): Promise<void> {
+        try {
+            if (!this.structuredEditManager) {
+                throw new Error('Structured edit manager not initialized');
+            }
+
+            // Create backups for files being modified
+            const filesToBackup = fileEdits.map(f => f.filePath);
+
+            await this.backupManager.backupFiles(filesToBackup);
+
+            // Apply structured edits
+            const result = await this.structuredEditManager.applyStructuredEdits(fileEdits, (msg) => {
+                this.sendMessage({
+                    type: 'info',
+                    message: msg
+                });
+            });
+
+            if (result.success) {
+                vscode.window.showInformationMessage(
+                    `Successfully applied ${result.applied} file edit(s)${result.failed > 0 ? ` (${result.failed} failed)` : ''}`
+                );
+
+                this.sendMessage({
+                    type: 'changesApplied',
+                    files: fileEdits
+                });
+
+                // Commit to git
+                if (this.gitManager) {
+                    const gitChanges: GitChange[] = [];
+                    const messages = this.currentSession?.messages || [];
+                    const lastUserMessage = [...messages].reverse().find(m => m.role === 'user');
+
+                    for (const fileEdit of fileEdits) {
+                        for (const edit of fileEdit.edits) {
+                            gitChanges.push({
+                                path: fileEdit.filePath,
+                                action: 'update' as const,
+                                content: edit.newContent
+                            });
+                        }
+                    }
+
+                    await this.gitManager.commitAIChanges(gitChanges, lastUserMessage?.content || 'AI changes');
+                }
+            } else {
+                vscode.window.showErrorMessage(`Failed to apply some changes (${result.failed} failed, ${result.applied} succeeded)`);
+            }
+        } catch (error: any) {
+            vscode.window.showErrorMessage(`Failed to apply structured edits: ${error.message}`);
+        }
+    }
+
+    /**
+     * Apply legacy format file changes (backward compatibility)
+     */
+    private async applyLegacyFileChanges(
+        files: Array<{ path: string; action: string; content: string }>
+    ): Promise<void> {
+        // Create backups
+        const filesToBackup = files
+            .filter((f) => f.action === 'update')
+            .map((f) => f.path);
+
+        await this.backupManager.backupFiles(filesToBackup);
+
+        // Apply changes
+        await this.fileManager.applyFileChanges(files);
+
+        vscode.window.showInformationMessage(
+            `Successfully applied changes to ${files.length} file(s)`
+        );
+
+        this.sendMessage({
+            type: 'changesApplied',
+            files
+        });
+
+        // Commit to git
+        if (this.gitManager) {
+            const gitChanges: GitChange[] = files.map(f => ({
+                path: f.path,
+                action: f.action as 'update' | 'create' | 'delete',
+                content: f.content
+            }));
+
+            const messages = this.currentSession?.messages || [];
+            const lastUserMessage = [...messages].reverse().find(m => m.role === 'user');
+            await this.gitManager.commitAIChanges(gitChanges, lastUserMessage?.content || 'AI changes');
         }
     }
 
@@ -707,7 +939,7 @@ ${gitDiffContent}${terminalContent}
     private async switchSession(sessionId: string): Promise<void> {
         await this.chatHistoryManager.setActiveSession(sessionId);
         const session = await this.chatHistoryManager.getSession(sessionId);
-        
+
         if (session) {
             this.currentSession = session;
             this.messagesLoaded = false; // Reset the flag
@@ -959,19 +1191,88 @@ ${gitDiffContent}${terminalContent}
 
         .message-content {
             white-space: pre-wrap;
+            overflow-x: auto;
+        }
+
+        .message-content p {
+            margin: 8px 0;
+        }
+
+        .message-content h1,
+        .message-content h2,
+        .message-content h3,
+        .message-content h4 {
+            margin: 12px 0 8px 0;
+            font-weight: 600;
+        }
+
+        .message-content h1 { font-size: 1.5em; }
+        .message-content h2 { font-size: 1.3em; }
+        .message-content h3 { font-size: 1.1em; }
+
+        .message-content ul,
+        .message-content ol {
+            margin: 8px 0;
+            padding-left: 24px;
+        }
+
+        .message-content li {
+            margin: 4px 0;
         }
 
         .message-content pre {
             background-color: var(--vscode-textCodeBlock-background);
-            padding: 8px;
+            padding: 12px;
             border-radius: 4px;
             overflow-x: auto;
             margin: 8px 0;
+            border: 1px solid var(--vscode-panel-border);
         }
 
         .message-content code {
             font-family: var(--vscode-editor-font-family);
             font-size: var(--vscode-editor-font-size);
+        }
+
+        .message-content :not(pre) > code {
+            background-color: var(--vscode-textCodeBlock-background);
+            padding: 2px 6px;
+            border-radius: 3px;
+        }
+
+        .message-content a {
+            color: var(--vscode-textLink-foreground);
+            text-decoration: underline;
+        }
+
+        .message-content strong {
+            font-weight: 600;
+        }
+
+        .message-content em {
+            font-style: italic;
+        }
+
+        .message-content blockquote {
+            border-left: 3px solid var(--vscode-textLink-foreground);
+            padding-left: 12px;
+            margin: 8px 0;
+            color: var(--vscode-descriptionForeground);
+        }
+
+        .message-content table {
+            border-collapse: collapse;
+            margin: 8px 0;
+        }
+
+        .message-content th,
+        .message-content td {
+            border: 1px solid var(--vscode-panel-border);
+            padding: 6px 12px;
+        }
+
+        .message-content th {
+            background-color: var(--vscode-editor-inactiveSelectionBackground);
         }
 
         .file-changes {
@@ -1081,6 +1382,50 @@ ${gitDiffContent}${terminalContent}
 
         .file-change-actions button:hover {
             background: var(--vscode-button-hoverBackground);
+        }
+
+        .file-change-preview {
+            margin-top: 8px;
+            padding: 12px;
+            background-color: var(--vscode-editor-background);
+            border: 1px solid var(--vscode-panel-border);
+            border-radius: 4px;
+            font-size: 12px;
+            display: none;
+        }
+
+        .file-change-preview.show {
+            display: block;
+        }
+
+        .file-change-preview-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 8px;
+            font-weight: 600;
+            color: var(--vscode-foreground);
+        }
+
+        .file-change-preview-content {
+            background-color: var(--vscode-textCodeBlock-background);
+            border: 1px solid var(--vscode-panel-border);
+            border-radius: 4px;
+            overflow-x: auto;
+        }
+
+        .file-change-preview-content pre {
+            margin: 0;
+            padding: 12px;
+            font-family: var(--vscode-editor-font-family);
+            font-size: var(--vscode-editor-font-size);
+            white-space: pre;
+            overflow-x: auto;
+        }
+
+        .file-change-preview-content code {
+            font-family: var(--vscode-editor-font-family);
+            font-size: var(--vscode-editor-font-size);
         }
 
         .loading-indicator {
@@ -1390,7 +1735,7 @@ ${gitDiffContent}${terminalContent}
 </head>
 <body>
     <div class="header">
-        <h1>Prime DevBot</h1>
+        <h1>KBot</h1>
         <div class="header-actions">
             <button id="newChatBtn">New Chat</button>
             <button id="clearHistory">Clear History</button>
@@ -1921,24 +2266,27 @@ function setInputTokens(tokens) {
 
 function finalizeStreamingMessage() {
     isStreaming = false;
-    const finalContent = streamingContent;
     streamingContent = '';
 
-    // Hide loading indicator
+    // Hide loading indicator and content
     const loadingIndicator = document.getElementById('loadingIndicator');
     if (loadingIndicator) {
         loadingIndicator.classList.add('hidden');
     }
 
-    // Create the actual assistant message bubble with the complete content
-    if (finalContent) {
-        addMessage({
-            id: Date.now(),
-            role: 'assistant',
-            content: finalContent,
-            timestamp: Date.now()
-        });
+    const loadingContent = document.getElementById('loadingContent');
+    if (loadingContent) {
+        loadingContent.classList.add('hidden');
+        loadingContent.textContent = '';
     }
+
+    const loadingMessage = document.getElementById('loadingMessage');
+    if (loadingMessage) {
+        loadingMessage.classList.remove('hidden');
+    }
+
+    // Note: The actual message will be sent by the backend via 'messageAdded' event
+    // after parsing the structured response and extracting file changes
 }
 
 // Store current files for accept all
@@ -1960,24 +2308,30 @@ function addFileChanges(files, userMessage) {
     let summary = 'Proposed Changes';
     if (created > 0 || modified > 0 || deleted > 0) {
         summary += ' (';
-        if (created > 0) summary += \`\${created} new\`;
+        if (created > 0) summary += created + ' new';
         if (created > 0 && modified > 0) summary += ', ';
-        if (modified > 0) summary += \`\${modified} modified\`;
+        if (modified > 0) summary += modified + ' modified';
         if ((created > 0 || modified > 0) && deleted > 0) summary += ', ';
-        if (deleted > 0) summary += \`\${deleted} deleted\`;
+        if (deleted > 0) summary += deleted + ' deleted';
         summary += ')';
     }
 
-    changesDiv.innerHTML = \`
-        <div class="file-changes-header">
-            <h3>\${escapeHtml(summary)}</h3>
-            <button class="accept-all-button" onclick="acceptAllChanges()">Accept All</button>
-        </div>
-    \`;
+    const acceptAllButton = document.createElement('button');
+    acceptAllButton.className = 'accept-all-button';
+    acceptAllButton.textContent = 'Accept All';
+    acceptAllButton.onclick = () => acceptAllChanges();
 
-    files.forEach(file => {
+    const headerDiv = document.createElement('div');
+    headerDiv.className = 'file-changes-header';
+    const h3 = document.createElement('h3');
+    h3.textContent = summary;
+    headerDiv.appendChild(h3);
+    headerDiv.appendChild(acceptAllButton);
+    changesDiv.appendChild(headerDiv);
+
+    files.forEach((file, index) => {
         const fileDiv = document.createElement('div');
-        fileDiv.className = \`file-change \${file.action}\`;
+        fileDiv.className = 'file-change ' + file.action;
 
         const badgeLabels = {
             'create': 'NEW',
@@ -1985,18 +2339,87 @@ function addFileChanges(files, userMessage) {
             'delete': 'DELETED'
         };
 
-        fileDiv.innerHTML = \`
-            <div class="file-change-info">
-                <div class="file-change-path">
-                    \${escapeHtml(file.path)}
-                    <span class="file-change-badge \${file.action}">\${badgeLabels[file.action] || file.action.toUpperCase()}</span>
-                </div>
-            </div>
-            <div class="file-change-actions">
-                <button onclick="openFile('\${escapeHtml(file.path)}')">View</button>
-                <button onclick="acceptSingleChange('\${escapeHtml(file.path)}', '\${escapeHtml(file.action)}')">Accept</button>
-            </div>
-        \`;
+        // Info section
+        const infoDiv = document.createElement('div');
+        infoDiv.className = 'file-change-info';
+        const pathDiv = document.createElement('div');
+        pathDiv.className = 'file-change-path';
+        pathDiv.textContent = file.path;
+
+        const badge = document.createElement('span');
+        badge.className = 'file-change-badge ' + file.action;
+        badge.textContent = badgeLabels[file.action] || file.action.toUpperCase();
+
+        pathDiv.appendChild(badge);
+        infoDiv.appendChild(pathDiv);
+
+        // Actions section
+        const actionsDiv = document.createElement('div');
+        actionsDiv.className = 'file-change-actions';
+
+        // Preview button
+        const previewBtn = document.createElement('button');
+        previewBtn.textContent = 'Preview';
+        previewBtn.onclick = () => {
+            const previewDiv = document.getElementById('preview-' + index);
+            if (previewDiv) {
+                previewDiv.classList.toggle('show');
+            }
+        };
+
+        // View button
+        const viewBtn = document.createElement('button');
+        viewBtn.textContent = 'View';
+        viewBtn.onclick = () => {
+            openFile(file.path);
+        };
+
+        // Accept button
+        const acceptBtn = document.createElement('button');
+        acceptBtn.textContent = 'Accept';
+        acceptBtn.onclick = () => {
+            acceptSingleChange(file.path, file.action);
+        };
+
+        actionsDiv.appendChild(previewBtn);
+        actionsDiv.appendChild(viewBtn);
+        actionsDiv.appendChild(acceptBtn);
+
+        // Preview section
+        const previewDiv = document.createElement('div');
+        previewDiv.className = 'file-change-preview';
+        previewDiv.id = 'preview-' + index;
+
+        const previewHeader = document.createElement('div');
+        previewHeader.className = 'file-change-preview-header';
+
+        const titleSpan = document.createElement('span');
+        titleSpan.textContent = 'Preview: ' + file.path;
+
+        const closeBtn = document.createElement('button');
+        closeBtn.textContent = 'Close';
+        closeBtn.onclick = () => {
+            previewDiv.classList.remove('show');
+        };
+
+        previewHeader.appendChild(titleSpan);
+        previewHeader.appendChild(closeBtn);
+
+        const previewContent = document.createElement('div');
+        previewContent.className = 'file-change-preview-content';
+        const pre = document.createElement('pre');
+        const code = document.createElement('code');
+        code.textContent = file.content || '';
+        pre.appendChild(code);
+        previewContent.appendChild(pre);
+
+        previewDiv.appendChild(previewHeader);
+        previewDiv.appendChild(previewContent);
+
+        fileDiv.appendChild(infoDiv);
+        fileDiv.appendChild(actionsDiv);
+        fileDiv.appendChild(previewDiv);
+
         changesDiv.appendChild(fileDiv);
     });
 
@@ -2004,12 +2427,20 @@ function addFileChanges(files, userMessage) {
     chatContainer.scrollTop = chatContainer.scrollHeight;
 }
 
+// Toggle code preview
+function togglePreview(filePath, index) {
+    const previewDiv = document.getElementById('preview-' + index);
+    if (previewDiv) {
+        previewDiv.classList.toggle('show');
+    }
+}
+
 // Add message to chat
 function addMessage(message) {
     try {
         // Check for duplicate messages by ID
         if (message.id) {
-            const existingMessage = chatContainer.querySelector(\`[data-message-id="\${message.id}"]\`);
+            const existingMessage = chatContainer.querySelector('[data-message-id="' + message.id + '"]');
             if (existingMessage) {
                 console.log('Duplicate message detected, skipping:', message.id);
                 return;
@@ -2023,12 +2454,22 @@ function addMessage(message) {
         }
 
         const messageDiv = document.createElement('div');
-        messageDiv.className = \`message \${message.role}\`;
+        messageDiv.className = 'message ' + message.role;
         if (message.id) {
             messageDiv.setAttribute('data-message-id', message.id);
         }
-        messageDiv.innerHTML = \`<div class="message-content">\${escapeHtml(message.content)}</div>\`;
 
+        // Render markdown for assistant messages, plain text for user
+        const contentDiv = document.createElement('div');
+        contentDiv.className = 'message-content';
+
+        if (message.role === 'assistant') {
+            contentDiv.innerHTML = renderMarkdown(message.content);
+        } else {
+            contentDiv.textContent = message.content;
+        }
+
+        messageDiv.appendChild(contentDiv);
         chatContainer.appendChild(messageDiv);
         chatContainer.scrollTop = chatContainer.scrollHeight;
 
@@ -2048,11 +2489,90 @@ function addMessage(message) {
             });
         }
 
+        // Accept a single file change
+        function acceptSingleChange(path, action) {
+            // Find the file from currentFiles to get content
+            const file = currentFiles.find(f => f.path === path);
+            if (file) {
+                vscode.postMessage({
+                    type: 'applySingleChange',
+                    file: { path: file.path, action: file.action, content: file.content },
+                    userMessage: currentUserMessage
+                });
+            } else {
+                console.error('File not found in currentFiles:', path);
+            }
+        }
+
+        // Accept all file changes
+        function acceptAllChanges() {
+            vscode.postMessage({
+                type: 'applyChanges',
+                files: currentFiles,
+                userMessage: currentUserMessage
+            });
+        }
+
         // Escape HTML
         function escapeHtml(text) {
             const div = document.createElement('div');
             div.textContent = text;
             return div.innerHTML;
+        }
+
+        // Simple markdown renderer - FIXED version
+        function renderMarkdown(text) {
+            if (!text) return '';
+
+            // Escape HTML first
+            let html = escapeHtml(text);
+
+            // Code blocks - use char code for backtick
+            const bt = String.fromCharCode(96);
+            const codeParts = html.split(bt + bt + bt);
+            for (let i = 1; i < codeParts.length; i += 2) {
+                const codeBlock = codeParts[i];
+                const lines = codeBlock.split('\\n');
+                const lang = (lines[0] || '').trim() || 'text';
+                const code = lines.slice(1).join('\\n').trim();
+                codeParts[i] = '<pre><code class="language-' + lang + '">' + code + '</code></pre>';
+            }
+            html = codeParts.join('');
+
+            // Inline code
+            html = html.replace(new RegExp(bt + '([^' + bt + ']+' + bt + ')', 'g'), '<code>$1</code>');
+
+            // Headers - use regex literals directly
+            html = html.replace(/^#### (.*)$/gm, '<h4>$1</h4>');
+            html = html.replace(/^### (.*)$/gm, '<h3>$1</h3>');
+            html = html.replace(/^## (.*)$/gm, '<h2>$1</h2>');
+            html = html.replace(/^# (.*)$/gm, '<h1>$1</h1>');
+
+            // Bold and italic - regex literals work fine
+            html = html.replace(/\\*\\*\\*([^*]+)\\*\\*\\*/g, '<strong><em>$1</em></strong>');
+            html = html.replace(/\\*\\*([^*]+)\\*\\*/g, '<strong>$1</strong>');
+            html = html.replace(/\\*([^*]+)\\*/g, '<em>$1</em>');
+            html = html.replace(/___([^_]+)___/g, '<strong><em>$1</em></strong>');
+            html = html.replace(/__([^_]+)__/g, '<strong>$1</strong>');
+            html = html.replace(/_([^_]+)_/g, '<em>$1</em>');
+
+            // Blockquotes
+            html = html.replace(/^&gt; (.*)$/gm, '<blockquote>$1</blockquote>');
+
+            // Lists
+            html = html.replace(/^\\* (.*)$/gm, '<li>$1</li>');
+            html = html.replace(/^- (.*)$/gm, '<li>$1</li>');
+            html = html.replace(/^\\d+\\. (.*)$/gm, '<li>$1</li>');
+            html = html.replace(/(<li>.*<\\/li>\\n?)+/g, '<ul>$&</ul>');
+
+            // Links
+            html = html.replace(/\\[([^\\]]+)\\]\\(([^)]+)\\)/g, '<a href="$2" target="_blank">$1</a>');
+
+            // Line breaks and paragraphs
+            html = html.replace(/\\n\\n/g, '</p><p>');
+            html = html.replace(/\\n/g, '<br>');
+
+            return '<p>' + html + '</p>';
         }
 
         // Initialize when DOM is ready
@@ -2202,6 +2722,16 @@ function addMessage(message) {
                         id: Date.now(),
                         role: 'system',
                         content: \`Terminal command executed: \${message.command.command}\nOutput: \${message.command.output}\`,
+                        timestamp: Date.now()
+                    });
+                    break;
+                case 'shellOutput':
+                    const shellCommandText = message.command || '';
+                    const shellOutputText = message.output || '';
+                    addMessage({
+                        id: Date.now(),
+                        role: 'system',
+                        content: '🔧 Shell command executed:\\n\\n' + shellCommandText + '\\n\\n**Output:**\\n\\n' + shellOutputText,
                         timestamp: Date.now()
                     });
                     break;

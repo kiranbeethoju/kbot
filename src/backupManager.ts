@@ -13,7 +13,7 @@ export interface BackupEntry {
 }
 
 export class BackupManager {
-    private readonly BACKUP_DIR = '.local-azure-gpt-backup';
+    private readonly BACKUP_DIR = '.kbot-backup';
     private backups: BackupEntry[] = [];
 
     constructor(private context: vscode.ExtensionContext) {

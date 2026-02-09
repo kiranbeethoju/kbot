@@ -1,0 +1,28 @@
+# Node modules
+node_modules/
+
+# Build output
+out/
+dist/
+
+# VSIX files
+*.vsix
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+
+# Logs
+*.log
+
+# Test files
+test_*.js
+*.test.js
+
+# Backup directory (local backups)
+.kbot-backup/
+.local-azure-gpt-backup/

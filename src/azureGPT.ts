@@ -15,6 +15,7 @@ export interface ChatMessage {
 
 export interface GPTResponse {
     explanation: string;
+    shell?: string;  // Shell command to execute
     files: Array<{
         path: string;
         action: 'update' | 'create' | 'delete';
@@ -186,7 +187,7 @@ export class AzureGPTService {
      */
     parseStructuredResponse(content: string): GPTResponse {
         try {
-            // Try to extract JSON from the response
+            // First, try to extract JSON from markdown code blocks
             const jsonMatch = content.match(/```json\n([\s\S]*?)\n```/) ||
                              content.match(/\{[\s\S]*\}/);
 
@@ -196,8 +197,52 @@ export class AzureGPTService {
 
                 return {
                     explanation: parsed.explanation || '',
+                    shell: parsed.shell,  // Extract shell command
                     files: parsed.files || []
                 };
+            }
+
+            // Try to parse function call format: <function=name>
+            const functionCallMatch = content.match(/<function=(\w+)>([\s\S]*?)<\/function>/);
+            if (functionCallMatch) {
+                const functionName = functionCallMatch[1];
+                const functionContent = functionCallMatch[2];
+
+                // Try to parse the parameters as XML-like tags
+                const paramRegex = /<parameter=(\w+)>([\s\S]*?)<\/parameter>/g;
+                const params: any = {};
+                let paramMatch;
+
+                while ((paramMatch = paramRegex.exec(functionContent)) !== null) {
+                    const paramName = paramMatch[1];
+                    const paramValue = paramMatch[2];
+
+                    // Try to parse JSON value, otherwise use as string
+                    try {
+                        params[paramName] = JSON.parse(paramValue);
+                    } catch {
+                        params[paramName] = paramValue;
+                    }
+                }
+
+                // Map function calls to our response format
+                if (functionName === 'update_file' || functionName === 'write') {
+                    const files: any[] = [];
+                    if (params.path && params.content) {
+                        files.push({
+                            path: params.path,
+                            action: params.action || 'create',
+                            content: params.content
+                        });
+                    } else if (params.files && Array.isArray(params.files)) {
+                        files.push(...params.files);
+                    }
+                    return {
+                        explanation: params.explanation || content,
+                        files,
+                        shell: params.shell
+                    };
+                }
             }
         } catch (e) {
             // If parsing fails, return raw content as explanation
@@ -221,13 +266,9 @@ export class AzureGPTService {
         // Get custom system prompt from storage
         const customPrompt = await this.credentialManager.getSystemPrompt();
 
-        // Get workspace path for the prompt
-        const workspacePath = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || process.cwd();
-
         // Replace placeholders in custom prompt with actual context
         let prompt = customPrompt
             .replace(/\{fileCount\}/g, context.fileCount.toString())
-            .replace(/\{workspacePath\}/g, workspacePath)
             .replace(/\{includeGitDiff\}/g, context.includeGitDiff ?
                 '- Git diff showing recent changes' : '')
             .replace(/\{includeTerminal\}/g, context.includeTerminal ?

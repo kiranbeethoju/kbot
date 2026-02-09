@@ -1,16 +1,18 @@
 /**
  * Credential Manager
- * Handles secure storage of Azure OpenAI and NVIDIA credentials
+ * Handles secure storage of Azure OpenAI, NVIDIA, Anthropic Foundry, and Z.AI credentials
  */
 
 import * as vscode from 'vscode';
 import { Logger } from './logger';
-import { ProviderType, AzureCredentials, NvidiaCredentials } from './types';
+import { ProviderType, AzureCredentials, NvidiaCredentials, AnthropicFoundryCredentials, ZaiCredentials } from './types';
 
 export interface StoredCredentials {
     provider: ProviderType;
     azure?: AzureCredentials;
     nvidia?: NvidiaCredentials[];
+    anthropicFoundry?: AnthropicFoundryCredentials;
+    zai?: ZaiCredentials;
 }
 
 export class CredentialManager {
@@ -22,63 +24,260 @@ export class CredentialManager {
     private static readonly NVIDIA_CREDENTIALS_KEY = 'nvidia.credentials';
     private static readonly SELECTED_PROVIDER_KEY = 'selected.provider';
 
+    // Anthropic Foundry credentials keys
+    private static readonly ANTHROPIC_FOUNDRY_CREDENTIALS_KEY = 'anthropic-foundry.credentials';
+    private static readonly ANTHROPIC_FOUNDRY_API_KEY_SECRET = 'anthropic-foundry.apiKey';
+
+    // Z.AI credentials keys
+    private static readonly ZAI_CREDENTIALS_KEY = 'zai.credentials';
+    private static readonly ZAI_API_KEY_SECRET = 'zai.apiKey';
+
     // System prompt key
     private static readonly SYSTEM_PROMPT_KEY = 'custom.system.prompt';
-    private static readonly DEFAULT_SYSTEM_PROMPT = `You are an advanced coding assistant with shell command execution capabilities.
+    private static readonly DEFAULT_SYSTEM_PROMPT = `You are KBot, an expert coding assistant.
 
-## CONTEXT PROVIDED
-- File(s) automatically collected from the CURRENT WORKING DIRECTORY
-- All relevant source files from the workspace are included
-- Only common exclusions apply (node_modules, .git, dist, build, binaries, etc.)
-- Current working directory: {workspacePath}
+## CRITICAL: HOW TO MAKE CODE CHANGES
 
-## YOUR CAPABILITIES
-1. **Code Analysis**: Read, understand, and modify code from provided context
-2. **Shell Commands**: You can execute shell commands by including them in your response using this format:
-   \`\`\`shell
-   <command here>
-   \`\`\`
+When the user asks you to modify, create, or change ANY file, you MUST respond with JSON format:
 
-   Examples of commands you can run:
-   - \`ls -la\` - list files
-   - \`pwd\` - show current directory
-   - \`ps aux | grep node\` - check processes
-   - \`curl https://api.example.com\` - make HTTP requests
-   - \`npm install <package>\` - install dependencies
-   - \`python script.py\` - run scripts
-   - \`make build\` - run build commands
-
-3. **File Operations**: Return JSON for code changes:
 \`\`\`json
 {
-  "explanation": "What you did and why",
+  "explanation": "Brief description of what you're doing",
   "files": [
     {
-      "path": "relative/path/to/file.ext",
-      "action": "update|create|delete",
-      "content": "full file content here"
+      "path": "filename.ext",
+      "edits": [
+        {
+          "startLine": 0,
+          "endLine": 0,
+          "newContent": "new code here"
+        }
+      ]
     }
-  ],
-  "shell": "optional command to execute"
+  ]
 }
 \`\`\`
 
-## IMPORTANT RULES
-1. **NEVER hallucinate files** - only work with provided file context
-2. **Use EXACT file paths** as provided in the context
-3. **For shell commands**: Always explain what the command does before showing it
-4. **For code changes**: Always show the complete file content, not snippets
-5. **For simple questions**: Just explain, don't generate code
-6. **Security**: Consider security implications of any command or code change
-7. **Best practices**: Follow language-specific best practices and patterns
+If the user asks a question that doesn't require file changes, just answer normally as plain text.
 
-## WORKSPACE INFORMATION
-- Current workspace: {workspacePath}
-- Total files available: {fileCount}
+## EXAMPLES
+
+**User:** "replace 10 with 20 in hello.py"
+**You:**
+\`\`\`json
+{
+  "explanation": "Changed range from 10 to 20",
+  "files": [
+    {
+      "path": "hello.py",
+      "edits": [
+        {
+          "startLine": 0,
+          "endLine": 0,
+          "newContent": "for i in range(20):"
+        }
+      ]
+    }
+  ]
+}
+\`\`\`
+
+**User:** "what files are in the workspace?"
+**You:** There are 3 files: hello.py, readme.md, and app.md
+
+## CORE PRINCIPLE: STRUCTURED EDITS OVER FULL FILE REPLACEMENT
+
+❌ NEVER regenerate entire files - it breaks formatting, loses context, makes diffs unreadable
+✅ ALWAYS use line-level edits - precise, readable, safe, maintains code structure
+
+## CONTEXT PROVIDED
+The user's message includes workspace files shown as:
+1. **FILE LIST** - All files in the workspace
+2. **FILE CONTENTS** - Full contents of each file
+
+Total files: {fileCount}
+
+## HOW TO RESPOND
+
+### Simple Questions? Just Answer!
+User: "How many files?"
+You: "There are 2 files: hello.py and readme.md"
+
+User: "What does hello.py do?"
+You: "It's a Python script that..."
+
+### File Changes? Use STRUCTURED LINE-LEVEL EDITS
+
+**Format 1: JSON with line edits (RECOMMENDED)**
+\`\`\`json
+{
+  "explanation": "Added validation to processOrder function",
+  "files": [
+    {
+      "path": "orders.py",
+      "edits": [
+        {
+          "startLine": 42,
+          "endLine": 57,
+          "oldContent": "original code being replaced",
+          "newContent": "new validated code here"
+        }
+      ]
+    }
+  ]
+}
+\`\`\`
+
+**Format 2: Unified Diff**
+\`\`\`diff
+--- a/orders.py
++++ b/orders.py
+@@ -42,16 +42,20 @@
+ def process_order(order_id):
+-    result = process_internal(order_id)
++    try:
++        result = process_internal(order_id)
++        logger.info(f"Order processed successfully")
++    except Exception as e:
++        logger.error(f"Failed: {e}")
++        raise
+     return result
+\`\`\`
+
+**Creating New Files:**
+\`\`\`json
+{
+  "explanation": "Creating new validation module",
+  "files": [
+    {
+      "path": "validators.py",
+      "edits": [
+        {
+          "startLine": 0,
+          "endLine": 0,
+          "newContent": "def validate_order(data):\\n    # validation logic\\n    pass"
+        }
+      ]
+    }
+  ]
+}
+\`\`\`
+
+### Terminal Commands? Use Code Blocks
+\`\`\`shell
+ls -la
+npm install
+\`\`\`
+
+## WHY STRUCTURED EDITS MATTER
+
+**Example: Add error handling to function**
+
+❌ BAD - Full file replacement:
+\`\`\`json
+{"path": "orders.py", "content": "entire 500 line file with one line changed"}
+\`\`\`
+
+✅ GOOD - Line-level edit:
+\`\`\`json
+{
+  "path": "orders.py",
+  "edits": [
+    {
+      "startLine": 42,
+      "endLine": 45,
+      "newContent": "    try:\\n        result = process(order)\\n    except Exception as e:\\n        handle_error(e)"
+    }
+  ]
+}
+\`\`\`
+
+**Benefits of structured edits:**
+- Precise diffs in Git
+- Preserves comments and formatting
+- Easy to review and approve
+- No merge conflicts
+- Maintains AST structure
+
+## EDITING EXAMPLES
+
+**Add validation:**
+\`\`\`json
+{
+  "explanation": "Added input validation to the checkout function",
+  "files": [
+    {
+      "path": "checkout.py",
+      "edits": [
+        {
+          "startLine": 18,
+          "endLine": 21,
+          "newContent": "    if not user_id or not isinstance(user_id, int):\\n        raise ValueError('Invalid user_id')\\n    if amount <= 0:\\n        raise ValueError('Amount must be positive')"
+        }
+      ]
+    }
+  ]
+}
+\`\`\`
+
+**Fix bug in function:**
+\`\`\`json
+{
+  "explanation": "Fixed off-by-one error in loop boundary",
+  "files": [
+    {
+      "path": "processor.py",
+      "edits": [
+        {
+          "startLine": 75,
+          "endLine": 75,
+          "newContent": "        for i in range(len(items) + 1):"
+        }
+      ]
+    }
+  ]
+}
+\`\`\`
+
+**Add new function:**
+\`\`\`json
+{
+  "explanation": "Added helper function for data transformation",
+  "files": [
+    {
+      "path": "utils.py",
+      "edits": [
+        {
+          "startLine": 150,
+          "endLine": 150,
+          "newContent": "def transform_data(data: dict) -> dict:\\n    return {k: v * 2 for k, v in data.items()}\\n\\n"
+        }
+      ]
+    }
+  ]
+}
+\`\`\`
+
+## ABSOLUTELY FORBIDDEN
+❌ DO NOT use <function=> tags
+❌ DO NOT use <parameter=> tags
+❌ DO NOT use tool/function calling format
+❌ DO NOT regenerate entire files unless creating a new file
+✅ ONLY use plain text, JSON in code blocks, or shell code blocks
+
+## CRITICAL RULES
+1. Check FILE LIST before doing anything
+2. Answer simple questions directly as plain text
+3. Use structured JSON for file changes (line-level edits preferred)
+4. Use shell code blocks for terminal commands
+5. ALWAYS use startLine/endLine for existing file edits
+6. Create new files with startLine=0, endLine=0, newContent=full content
+
+## ADDITIONAL CONTEXT
 {includeGitDiff}
 {includeTerminal}
 
-When the user asks to run tests, build, install packages, check status, or any other terminal operation, USE SHELL COMMANDS!`;
+Remember: Precision over convenience. Line-level edits create clean, maintainable code changes!`;
 
     constructor(private context: vscode.ExtensionContext) {}
 
@@ -148,29 +347,57 @@ When the user asks to run tests, build, install packages, check status, or any o
             return null;
         }
 
-        return allNvidia.find(m => m.providerName === selectedModel) || allNvidia[0] || null;
+        const creds = allNvidia.find(m => m.providerName === selectedModel) || allNvidia[0] || null;
+
+        if (creds) {
+            // Load API key from secret storage if it exists
+            const secretKey = `nvidia.apiKey.${creds.providerName}`;
+            const apiKey = await this.context.secrets.get(secretKey);
+            if (apiKey) {
+                creds.apiKey = apiKey;
+            }
+        }
+
+        return creds;
     }
 
     /**
      * Get all NVIDIA credentials
      */
     async getAllNvidiaCredentials(): Promise<NvidiaCredentials[]> {
-        return this.context.globalState.get<NvidiaCredentials[]>(
+        const allCreds = this.context.globalState.get<NvidiaCredentials[]>(
             CredentialManager.NVIDIA_CREDENTIALS_KEY
         ) || [];
+
+        // Load API keys from secret storage for each credential
+        for (const cred of allCreds) {
+            const secretKey = `nvidia.apiKey.${cred.providerName}`;
+            const apiKey = await this.context.secrets.get(secretKey);
+            if (apiKey) {
+                cred.apiKey = apiKey;
+            }
+        }
+
+        return allCreds;
     }
 
     /**
      * Get stored credentials based on selected provider
      */
-    async getCredentials(): Promise<AzureCredentials | NvidiaCredentials | null> {
+    async getCredentials(): Promise<AzureCredentials | NvidiaCredentials | AnthropicFoundryCredentials | ZaiCredentials | null> {
         const provider = await this.getSelectedProvider();
 
         if (provider === ProviderType.Azure) {
             return this.getAzureCredentials();
-        } else {
+        } else if (provider === ProviderType.NVIDIA) {
             return this.getNvidiaCredentials();
+        } else if (provider === ProviderType.AnthropicFoundry) {
+            return this.getAnthropicFoundryCredentials();
+        } else if (provider === ProviderType.Zai) {
+            return this.getZaiCredentials();
         }
+
+        return null;
     }
 
     /**
@@ -270,6 +497,16 @@ When the user asks to run tests, build, install packages, check status, or any o
      */
     async configureNvidiaCredentials(credentials: NvidiaCredentials[]): Promise<void> {
         try {
+            // Store API keys separately in secret storage
+            for (const cred of credentials) {
+                if (cred.apiKey) {
+                    const secretKey = `nvidia.apiKey.${cred.providerName}`;
+                    await this.context.secrets.store(secretKey, cred.apiKey);
+                    // Remove the apiKey from the credential that will be stored in globalState
+                    cred.apiKey = undefined;
+                }
+            }
+
             await this.context.globalState.update(
                 CredentialManager.NVIDIA_CREDENTIALS_KEY,
                 credentials
@@ -441,5 +678,111 @@ When the user asks to run tests, build, install packages, check status, or any o
      */
     getDefaultSystemPrompt(): string {
         return CredentialManager.DEFAULT_SYSTEM_PROMPT;
+    }
+
+    /**
+     * Get Anthropic Foundry credentials
+     */
+    async getAnthropicFoundryCredentials(): Promise<AnthropicFoundryCredentials | null> {
+        const stored = this.context.globalState.get<AnthropicFoundryCredentials>(
+            CredentialManager.ANTHROPIC_FOUNDRY_CREDENTIALS_KEY
+        );
+
+        if (!stored) {
+            return null;
+        }
+
+        // API key is stored separately in secret storage
+        const apiKey = await this.context.secrets.get(
+            CredentialManager.ANTHROPIC_FOUNDRY_API_KEY_SECRET
+        );
+
+        if (!apiKey) {
+            return null;
+        }
+
+        return {
+            ...stored,
+            apiKey
+        };
+    }
+
+    /**
+     * Configure Anthropic Foundry credentials
+     */
+    async configureAnthropicFoundryCredentials(credentials: AnthropicFoundryCredentials): Promise<void> {
+        try {
+            // Store non-sensitive data in globalState
+            const { apiKey, ...credentialsWithoutKey } = credentials;
+
+            await this.context.globalState.update(
+                CredentialManager.ANTHROPIC_FOUNDRY_CREDENTIALS_KEY,
+                credentialsWithoutKey
+            );
+
+            // Store API key in secret storage
+            await this.context.secrets.store(
+                CredentialManager.ANTHROPIC_FOUNDRY_API_KEY_SECRET,
+                apiKey
+            );
+
+            Logger.log('Anthropic Foundry credentials stored successfully');
+        } catch (error: any) {
+            Logger.error('Failed to store Anthropic Foundry credentials', error);
+            throw new Error(`Failed to save credentials: ${error.message}`);
+        }
+    }
+
+    /**
+     * Get Z.AI credentials
+     */
+    async getZaiCredentials(): Promise<ZaiCredentials | null> {
+        const stored = this.context.globalState.get<ZaiCredentials>(
+            CredentialManager.ZAI_CREDENTIALS_KEY
+        );
+
+        if (!stored) {
+            return null;
+        }
+
+        // API key is stored separately in secret storage
+        const apiKey = await this.context.secrets.get(
+            CredentialManager.ZAI_API_KEY_SECRET
+        );
+
+        if (!apiKey) {
+            return null;
+        }
+
+        return {
+            ...stored,
+            apiKey
+        };
+    }
+
+    /**
+     * Configure Z.AI credentials
+     */
+    async configureZaiCredentials(credentials: ZaiCredentials): Promise<void> {
+        try {
+            // Store non-sensitive data in globalState
+            const { apiKey, ...credentialsWithoutKey } = credentials;
+
+            await this.context.globalState.update(
+                CredentialManager.ZAI_CREDENTIALS_KEY,
+                credentialsWithoutKey
+            );
+
+            // Store API key in secret storage
+            await this.context.secrets.store(
+                CredentialManager.ZAI_API_KEY_SECRET,
+                apiKey
+            );
+
+            Logger.log('Z.AI credentials stored successfully');
+        } catch (error: any) {
+            Logger.error('Failed to store Z.AI credentials', error);
+            throw new Error(`Failed to save credentials: ${error.message}`);
+        }
     }
 }

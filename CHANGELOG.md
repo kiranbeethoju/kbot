@@ -1,6 +1,83 @@
 # Change Log
 
-All notable changes to the "Local Prime DevBot" extension will be documented in this file.
+All notable changes to the "KBot" extension will be documented in this file.
+
+## [1.5.0] - 2025-02-08
+
+### NEW: Cursor/Windsurf-Style Structured Editing
+- Implemented precise line-level code editing instead of full file replacement
+- AI now uses structured edits with `startLine`, `endLine`, `newContent` format
+- Supports both JSON structured edits and unified diff format
+- Cleaner Git diffs with surgical changes instead of full file rewrites
+- Maintains code structure, formatting, and comments
+- Backward compatible with legacy file change format
+
+### Improvements
+- Updated system prompt to emphasize structured edits over full file replacement
+- Enhanced `StructuredEditManager` for precise code patching
+- Better code review experience with minimal, focused diffs
+
+## [1.4.0] - 2025-02-08
+
+### NEW: Z.AI (GLM) Support
+- Added support for Z.AI GLM models (glm-4.7, glm-4-plus, etc.)
+- New provider option for Z.AI API
+- Full credential management for Z.AI
+
+### NEW: Anthropic Foundry Support
+- Added support for Anthropic Foundry (Azure-hosted Claude models)
+- Configure Anthropic Foundry endpoints and deployments
+- Support for claude-opus-4_5-dev and other Claude models
+
+### NEW: Manual Workspace Configuration
+- Configure custom workspace directory
+- Option to use auto-detect or set specific path
+- Workspace configuration persists across sessions
+
+### Improvements
+- Fixed credential update bug (now can properly change API keys)
+- Backup files now excluded from context
+- Better UX with "Change API Key" checkbox for all providers
+- Improved workspace detection - now uses current opened project
+- Renamed extension from "Prime DevBot" to "KBot"
+
+## [1.3.0] - 2025-02-08
+
+### Improvements
+- Enhanced workspace file detection
+- Better context collection
+- Improved file exclusion handling
+
+## [1.2.0] - 2025-02-08
+
+### NEW: Workspace Directory Configuration
+- Configure workspace directory from UI
+- Set custom workspace or use auto-detect
+- Workspace settings shown in Credentials panel
+
+### Improvements
+- Fixed workspace path to use current working directory by default
+- Better workspace detection when opening projects
+
+## [1.1.8] - 2025-02-04
+
+### NEW: Shell Command Execution
+- AI can now execute shell commands automatically
+- Commands run in workspace directory
+- Full output logging and display
+- Security: All commands logged and visible
+
+### Other Improvements
+- Enhanced workspace file detection (dynamic path resolution)
+- Improved file collection logging
+- Better context from workspace files
+
+## [1.1.7] - 2025-02-04
+
+### Bug Fixes
+- Fixed workspace path detection
+- Made workspace root detection dynamic
+- Improved path resolution
 
 ## [1.0.0] - 2026-02-02
 
@@ -24,11 +101,11 @@ All notable changes to the "Local Prime DevBot" extension will be documented in 
 - Full offline support (except for Azure GPT API calls)
 
 #### Commands
-- `Azure GPT: Open Azure GPT Chat` - Open the chat panel
-- `Azure GPT: Configure Azure Credentials` - Set up Azure OpenAI credentials
-- `Azure GPT: Clear Chat History` - Clear all conversation history
-- `Azure GPT: Export Chat History` - Export chat to JSON file
-- `Azure GPT: Rollback Last Changes` - Undo last applied changes
+- `KBot: Open KBot Chat` - Open the chat panel
+- `KBot: Configure KBot Credentials` - Set up Azure OpenAI credentials
+- `KBot: Clear Chat History` - Clear all conversation history
+- `KBot: Export Chat History` - Export chat to JSON file
+- `KBot: Rollback Last Changes` - Undo last applied changes
 
 #### Technical Details
 - Built with TypeScript

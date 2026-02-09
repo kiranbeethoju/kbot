@@ -49,7 +49,7 @@ export class NvidiaService {
     ): Promise<string> {
         await this.ensureCredentials();
 
-        const { endpoint, modelName } = this.credentials!;
+        const { endpoint, modelName, apiKey } = this.credentials!;
 
         // NVIDIA uses OpenAI-compatible API format
         const url = endpoint.endsWith('/chat/completions')
@@ -102,13 +102,25 @@ export class NvidiaService {
                 requestBody.temperature = this.credentials.temperature;
             }
 
+            // Only add top_p if configured in credentials
+            if (this.credentials.topP !== undefined) {
+                requestBody.top_p = this.credentials.topP;
+            }
+
             Logger.debug(`Request body: ${JSON.stringify({ ...requestBody, messages: `[${requestBody.messages.length} messages]` })}`);
+
+            const headers: Record<string, string> = {
+                'Content-Type': 'application/json'
+            };
+
+            // Add Authorization header if apiKey is provided (for online NVIDIA API)
+            if (this.credentials.apiKey) {
+                headers['Authorization'] = `Bearer ${this.credentials.apiKey}`;
+            }
 
             const response = await fetch(url, {
                 method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json'
-                },
+                headers,
                 body: JSON.stringify(requestBody),
                 signal
             });

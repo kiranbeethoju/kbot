@@ -637,6 +637,9 @@ ${gitDiffContent}${terminalContent}
                 }
             }
 
+            // Transform structured edits to legacy format for UI compatibility
+            const filesForUI = await this.transformFilesForUI(fileChangesToApply);
+
             // Signal streaming complete (this finalizes the accumulated streamed content)
             this.sendMessage({
                 type: 'streamingComplete'
@@ -648,7 +651,7 @@ ${gitDiffContent}${terminalContent}
                 role: 'assistant',
                 content: structuredResponse.explanation,
                 timestamp: Date.now(),
-                files: fileChangesToApply,
+                files: filesForUI,
                 shell: shellCommand,
                 shellOutput: shellOutput
             };
@@ -690,6 +693,46 @@ ${gitDiffContent}${terminalContent}
                 message: error.message || `Failed to get response from ${provider === ProviderType.Azure ? 'Azure GPT' : 'NVIDIA'}`
             });
         }
+    }
+
+    /**
+     * Transform structured edits to legacy format for UI compatibility
+     */
+    private async transformFilesForUI(
+        files: any[]
+    ): Promise<Array<{ path: string; action: string; content: string; originalContent?: string }>> {
+        const result: Array<{ path: string; action: string; content: string; originalContent?: string }> = [];
+
+        for (const file of files) {
+            // Check if this is structured edit format (has 'edits' property)
+            if ((file.edits && Array.isArray(file.edits)) || (file.filePath && file.edits)) {
+                // Structured edit format - transform to legacy
+                const filePath = file.path || file.filePath;
+                const edits = file.edits || [];
+
+                // Build a diff preview content
+                let previewContent = `Structured edits for ${filePath}:\n\n`;
+                for (const edit of edits) {
+                    previewContent += `Line ${edit.startLine}-${edit.endLine}:\n`;
+                    if (edit.oldContent) {
+                        previewContent += `- ${edit.oldContent}\n`;
+                    }
+                    previewContent += `+ ${edit.newContent}\n\n`;
+                }
+
+                result.push({
+                    path: filePath,
+                    action: 'update',
+                    content: previewContent,
+                    originalContent: file.originalContent
+                });
+            } else {
+                // Legacy format - keep as is
+                result.push(file);
+            }
+        }
+
+        return result;
     }
 
     /**

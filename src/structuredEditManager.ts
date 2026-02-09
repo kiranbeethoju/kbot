@@ -105,16 +105,22 @@ export class StructuredEditManager {
             const sortedEdits = [...fileEdit.edits].sort((a, b) => b.startLine - a.startLine);
 
             for (const lineEdit of sortedEdits) {
+                // When startLine === endLine, AI means "replace this line", not "insert at position"
+                // So we need to extend endLine to include the entire line
+                const endLineNumber = lineEdit.endLine > lineEdit.startLine
+                    ? lineEdit.endLine
+                    : lineEdit.startLine + 1; // +1 to include the entire line when start==end
+
                 const range = new vscode.Range(
                     new vscode.Position(lineEdit.startLine, 0),
-                    new vscode.Position(lineEdit.endLine, lineEdit.endLine > lineEdit.startLine ? 0 : 0)
+                    new vscode.Position(endLineNumber, 0)
                 );
 
                 // Get text to delete (for verification)
                 const textToDelete = document.getText(range);
 
                 edit.replace(uri, range, lineEdit.newContent);
-                Logger.log(`Edit: Lines ${lineEdit.startLine}-${lineEdit.endLine}: "${textToDelete.substring(0, 50)}..." → "${lineEdit.newContent.substring(0, 50)}..."`);
+                Logger.log(`Edit: Line ${lineEdit.startLine} → "${lineEdit.newContent.substring(0, 50)}..."`);
             }
 
             // Apply the edit

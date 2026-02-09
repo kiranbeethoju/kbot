@@ -84,6 +84,13 @@ export class StructuredEditManager {
             const content = await fs.promises.readFile(filePath, 'utf-8');
             const lines = content.split('\n');
 
+            // Log file content for debugging
+            Logger.log(`=== File: ${fileEdit.filePath} ===`);
+            Logger.log(`Total lines: ${lines.length}`);
+            lines.forEach((line, i) => {
+                Logger.log(`  Line ${i}: "${line}"`);
+            });
+
             // Validate old content if provided
             for (const edit of fileEdit.edits) {
                 if (edit.oldContent !== undefined) {
@@ -105,6 +112,12 @@ export class StructuredEditManager {
             const sortedEdits = [...fileEdit.edits].sort((a, b) => b.startLine - a.startLine);
 
             for (const lineEdit of sortedEdits) {
+                // Log the current line in the document
+                if (lineEdit.startLine < document.lineCount) {
+                    const textLine = document.lineAt(lineEdit.startLine);
+                    Logger.log(`=== Document line ${lineEdit.startLine}: "${textLine.text}"`);
+                }
+
                 // When startLine === endLine, AI means "replace this line", not "insert at position"
                 // So we need to extend endLine to include the entire line
                 const endLineNumber = lineEdit.endLine > lineEdit.startLine
@@ -119,8 +132,25 @@ export class StructuredEditManager {
                 // Get text to delete (for verification)
                 const textToDelete = document.getText(range);
 
-                edit.replace(uri, range, lineEdit.newContent);
-                Logger.log(`Edit: Line ${lineEdit.startLine} → "${lineEdit.newContent.substring(0, 50)}..."`);
+                // Ensure new content ends with newline if replacing a single line
+                // and the old content had a newline
+                let newContent = lineEdit.newContent;
+                if (lineEdit.endLine === lineEdit.startLine && textToDelete.endsWith('\n')) {
+                    // We're replacing a single line that had a newline
+                    // Check if new content already has newline
+                    if (!newContent.endsWith('\n')) {
+                        // Preserve the original line ending style (\n vs \r\n vs \r)
+                        const lineEnding = textToDelete.match(/\r?\n|\r/)?.[0] || '\n';
+                        newContent = newContent + lineEnding;
+                    }
+                }
+
+                Logger.log(`=== Applying Edit ===`);
+                Logger.log(`  Line range: ${lineEdit.startLine} to ${endLineNumber}`);
+                Logger.log(`  Text to delete: "${textToDelete}"`);
+                Logger.log(`  New content: "${newContent}"`);
+
+                edit.replace(uri, range, newContent);
             }
 
             // Apply the edit

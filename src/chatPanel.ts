@@ -710,21 +710,15 @@ ${gitDiffContent}${terminalContent}
                 const filePath = file.path || file.filePath;
                 const edits = file.edits || [];
 
-                // Build a diff preview content
-                let previewContent = `Structured edits for ${filePath}:\n\n`;
-                for (const edit of edits) {
-                    previewContent += `Line ${edit.startLine}-${edit.endLine}:\n`;
-                    if (edit.oldContent) {
-                        previewContent += `- ${edit.oldContent}\n`;
-                    }
-                    previewContent += `+ ${edit.newContent}\n\n`;
-                }
-
+                // For structured edits, we need to keep the edits array format
+                // so the applyChanges method can recognize it as structured format
                 result.push({
                     path: filePath,
                     action: 'update',
-                    content: previewContent,
-                    originalContent: file.originalContent
+                    content: '',  // Empty for structured edits, will use edits array
+                    originalContent: file.originalContent,
+                    edits: edits,  // Preserve the edits array
+                    isStructured: true  // Mark as structured edit format
                 });
             } else {
                 // Legacy format - keep as is
@@ -739,15 +733,23 @@ ${gitDiffContent}${terminalContent}
      * Apply file changes (supports both legacy and structured format)
      */
     private async applyChanges(
-        files: Array<{ path: string; action: string; content: string }> | FileStructuredEdit[]
+        files: Array<{ path: string; action: string; content: string; edits?: any[]; isStructured?: boolean }>
     ): Promise<void> {
         try {
-            // Check if this is the new structured format
-            const isStructured = files.length > 0 && 'edits' in (files[0] as any);
+            // Check if this is the new structured format (has edits array or isStructured flag)
+            const isStructured = files.length > 0 && ((files[0] as any).isStructured || 'edits' in (files[0] as any));
 
             if (isStructured) {
-                // New structured format - use StructuredEditManager
-                await this.applyStructuredEdits(files as FileStructuredEdit[]);
+                // Transform to FileStructuredEdit format
+                const structuredEdits: FileStructuredEdit[] = files
+                    .filter(f => f.isStructured || f.edits)
+                    .map(f => ({
+                        filePath: f.path,
+                        edits: f.edits || []
+                    }));
+
+                // Apply structured edits
+                await this.applyStructuredEdits(structuredEdits);
             } else {
                 // Legacy format - apply old method
                 await this.applyLegacyFileChanges(files as Array<{ path: string; action: string; content: string }>);
@@ -858,29 +860,62 @@ ${gitDiffContent}${terminalContent}
      * Apply single file change
      */
     private async applySingleChange(
-        file: { path: string; action: string; content: string },
+        file: { path: string; action: string; content: string; edits?: any[]; isStructured?: boolean },
         userMessage: string
     ): Promise<void> {
         try {
-            // Create backup if updating
-            if (file.action === 'update') {
-                await this.backupManager.backupFiles([file.path]);
-            }
-
-            // Apply change
-            await this.fileManager.applyFileChanges([file]);
-
-            // Commit to git
-            if (this.gitManager) {
-                const gitChange: GitChange = {
-                    path: file.path,
-                    action: file.action as 'update' | 'create' | 'delete',
-                    content: file.content
+            // Check if this is a structured edit
+            if (file.isStructured && file.edits && this.structuredEditManager) {
+                // Apply structured edit
+                const structuredFile: FileStructuredEdit = {
+                    filePath: file.path,
+                    edits: file.edits
                 };
-                await this.gitManager.commitAIChanges([gitChange], userMessage);
-            }
 
-            vscode.window.showInformationMessage(`Applied change to ${file.path}`);
+                const result = await this.structuredEditManager.applyStructuredEdits([structuredFile]);
+
+                if (result.success) {
+                    vscode.window.showInformationMessage(
+                        `Applied ${result.applied} edit(s) to ${file.path}`
+                    );
+
+                    // Commit to git
+                    if (this.gitManager) {
+                        const gitChanges: GitChange[] = [];
+                        for (const edit of file.edits) {
+                            gitChanges.push({
+                                path: file.path,
+                                action: 'update' as const,
+                                content: edit.newContent
+                            });
+                        }
+                        await this.gitManager.commitAIChanges(gitChanges, userMessage);
+                    }
+                } else {
+                    throw new Error(`${result.failed} edit(s) failed`);
+                }
+            } else {
+                // Legacy format
+                // Create backup if updating
+                if (file.action === 'update') {
+                    await this.backupManager.backupFiles([file.path]);
+                }
+
+                // Apply change
+                await this.fileManager.applyFileChanges([file]);
+
+                // Commit to git
+                if (this.gitManager) {
+                    const gitChange: GitChange = {
+                        path: file.path,
+                        action: file.action as 'update' | 'create' | 'delete',
+                        content: file.content
+                    };
+                    await this.gitManager.commitAIChanges([gitChange], userMessage);
+                }
+
+                vscode.window.showInformationMessage(`Applied change to ${file.path}`);
+            }
         } catch (error: any) {
             vscode.window.showErrorMessage(`Failed to apply change to ${file.path}: ${error.message}`);
         }

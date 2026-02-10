@@ -4,6 +4,8 @@
  */
 
 import * as vscode from 'vscode';
+import * as path from 'path';
+import * as fs from 'fs';
 import { CredentialManager } from './credentials';
 import { AzureGPTService } from './azureGPT';
 import { NvidiaService } from './nvidiaService';
@@ -17,7 +19,6 @@ import { GitManager, GitChange } from './gitManager';
 import { ChatHistoryManager, ChatSession } from './chatHistory';
 import { TerminalManager } from './terminalManager';
 import { ChatMessage, ProviderType } from './types';
-import { FileStructuredEdit } from './structuredEditManager';
 import { Logger } from './logger';
 
 export interface ChatMessageEntry {
@@ -702,31 +703,113 @@ ${gitDiffContent}${terminalContent}
         files: any[]
     ): Promise<Array<{ path: string; action: string; content: string; originalContent?: string }>> {
         const result: Array<{ path: string; action: string; content: string; originalContent?: string }> = [];
+        const seenFiles = new Set<string>();  // Track unique files
 
         for (const file of files) {
             // Check if this is structured edit format (has 'edits' property)
             if ((file.edits && Array.isArray(file.edits)) || (file.filePath && file.edits)) {
                 // Structured edit format - transform to legacy
                 const filePath = file.path || file.filePath;
+
+                // Skip duplicate files
+                if (seenFiles.has(filePath)) {
+                    Logger.warn(`Skipping duplicate file: ${filePath}`);
+                    continue;
+                }
+                seenFiles.add(filePath);
+
                 const edits = file.edits || [];
+
+                // Generate a diff preview with +/- markers and context
+                const diffPreview = await this.generateDiffPreview(filePath, edits, file.originalContent);
 
                 // For structured edits, we need to keep the edits array format
                 // so the applyChanges method can recognize it as structured format
                 result.push({
                     path: filePath,
                     action: 'update',
-                    content: '',  // Empty for structured edits, will use edits array
+                    content: diffPreview,  // Use diff preview instead of empty string
                     originalContent: file.originalContent,
                     edits: edits,  // Preserve the edits array
                     isStructured: true  // Mark as structured edit format
                 });
             } else {
                 // Legacy format - keep as is
+                const filePath = file.path;
+                if (filePath && seenFiles.has(filePath)) {
+                    Logger.warn(`Skipping duplicate file: ${filePath}`);
+                    continue;
+                }
+                if (filePath) seenFiles.add(filePath);
                 result.push(file);
             }
         }
 
         return result;
+    }
+
+    /**
+     * Generate a diff preview with +/- markers and context
+     */
+    private async generateDiffPreview(
+        filePath: string,
+        edits: any[],
+        originalContent?: string
+    ): Promise<string> {
+        try {
+            let preview = '';
+
+            for (const edit of edits) {
+                const startLine = edit.startLine;
+                const endLine = edit.endLine;
+
+                // Read the file to get context
+                const workspaceRoot = this.fileManager.getWorkspaceRoot();
+                const fullPath = path.join(workspaceRoot, filePath);
+                const content = originalContent || fs.readFileSync(fullPath, 'utf-8');
+                const lines = content.split('\n');
+
+                // Context: show 2 lines before and after
+                const contextBefore = Math.max(0, startLine - 2);
+                const contextAfter = Math.min(lines.length, endLine + 3);
+
+                preview += `Line ${startLine}${startLine !== endLine ? `-${endLine}` : ''}:\n`;
+
+                // Show context before (2 lines)
+                for (let i = contextBefore; i < startLine; i++) {
+                    if (i >= 0 && i < lines.length) {
+                        preview += `  ${lines[i]}\n`;
+                    }
+                }
+
+                // Show lines being removed with -
+                for (let i = startLine; i < endLine; i++) {
+                    if (i >= 0 && i < lines.length) {
+                        preview += `- ${lines[i]}\n`;
+                    }
+                }
+
+                // Show new content with +
+                const newLines = edit.newContent.split('\n');
+                for (const newLine of newLines) {
+                    preview += `+ ${newLine}\n`;
+                }
+
+                // Show context after (2 lines)
+                for (let i = endLine; i < contextAfter && i < endLine + 3; i++) {
+                    if (i >= 0 && i < lines.length) {
+                        preview += `  ${lines[i]}\n`;
+                    }
+                }
+
+                preview += '\n';
+            }
+
+            return preview || 'No changes preview available';
+        } catch (error: any) {
+            Logger.error('Error generating diff preview:', error);
+            return 'Error generating preview';
+        }
     }
 
     /**

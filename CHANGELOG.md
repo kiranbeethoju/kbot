@@ -2,6 +2,20 @@
 
 All notable changes to the "KBot" extension will be documented in this file.
 
+## [1.6.0] - 2025-02-10
+
+### Fixes
+- Fixed AI line numbering with explicit zero-indexed explanation in system prompt
+- File contents now show line numbers (000|content) for better AI understanding
+- Added validation to prevent full file replacement (rejects >80% or >50 lines changes)
+- Fixed duplicate "Accept" buttons for same file
+- Improved diff preview with +/- markers and 2 lines of context before/after
+
+### Improvements
+- Better diff preview shows exact changes with context
+- Deduplication prevents same file appearing multiple times
+- Clearer line numbering examples in system prompt
+
 ## [1.5.0] - 2025-02-08
 
 ### NEW: Cursor/Windsurf-Style Structured Editing

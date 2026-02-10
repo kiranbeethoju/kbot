@@ -55,6 +55,13 @@ export class StructuredEditManager {
             try {
                 progressCallback?.(`Editing ${fileEdit.filePath}...`);
 
+                // Validate edits before applying - prevent full file replacement
+                if (await this.isFullFileReplacement(fileEdit)) {
+                    Logger.error(`✗ Rejected full file replacement for ${fileEdit.filePath}`);
+                    failed++;
+                    continue;
+                }
+
                 const result = await this.applyFileEdit(fileEdit);
                 if (result) {
                     applied++;
@@ -70,6 +77,38 @@ export class StructuredEditManager {
         }
 
         return { success: failed === 0, applied, failed };
+    }
+
+    /**
+     * Check if the edit would replace the entire file
+     */
+    private async isFullFileReplacement(fileEdit: FileStructuredEdit): Promise<boolean> {
+        try {
+            const filePath = path.join(this.workspaceRoot, fileEdit.filePath);
+            const content = await fs.promises.readFile(filePath, 'utf-8');
+            const lines = content.split('\n');
+
+            // Calculate total lines that would be changed
+            let totalLinesChanged = 0;
+            for (const edit of fileEdit.edits) {
+                const lineCount = edit.endLine - edit.startLine;
+                totalLinesChanged += Math.max(1, lineCount);
+            }
+
+            // If changing more than 80% of the file or more than 50 lines, reject
+            const fileLineCount = lines.length;
+            const changeRatio = totalLinesChanged / fileLineCount;
+
+            if (changeRatio > 0.8 || totalLinesChanged > 50) {
+                Logger.warn(`Suspicious edit: ${totalLinesChanged}/${fileLineCount} lines (${(changeRatio * 100).toFixed(1)}%) in ${fileEdit.filePath}`);
+                return true;
+            }
+
+            return false;
+        } catch (error) {
+            Logger.warn('Could not validate file edit:', error);
+            return false;
+        }
     }
 
     /**

@@ -2685,9 +2685,16 @@ function addMessage(message) {
             // Find the file from currentFiles to get content
             const file = currentFiles.find(f => f.path === path);
             if (file) {
+                // Send the complete file object including edits and isStructured flag
                 vscode.postMessage({
                     type: 'applySingleChange',
-                    file: { path: file.path, action: file.action, content: file.content },
+                    file: {
+                        path: file.path,
+                        action: file.action,
+                        content: file.content,
+                        edits: file.edits,           // Include edits array
+                        isStructured: file.isStructured  // Include structured flag
+                    },
                     userMessage: currentUserMessage
                 });
             } else {

@@ -55,13 +55,6 @@ export class StructuredEditManager {
             try {
                 progressCallback?.(`Editing ${fileEdit.filePath}...`);
 
-                // Validate edits before applying - prevent full file replacement
-                if (await this.isFullFileReplacement(fileEdit)) {
-                    Logger.error(`✗ Rejected full file replacement for ${fileEdit.filePath}`);
-                    failed++;
-                    continue;
-                }
-
                 const result = await this.applyFileEdit(fileEdit);
                 if (result) {
                     applied++;
@@ -77,55 +70,6 @@ export class StructuredEditManager {
         }
 
         return { success: failed === 0, applied, failed };
-    }
-
-    /**
-     * Check if the edit would replace the entire file
-     */
-    private async isFullFileReplacement(fileEdit: FileStructuredEdit): Promise<boolean> {
-        try {
-            const filePath = path.join(this.workspaceRoot, fileEdit.filePath);
-
-            // Check if file exists
-            try {
-                await fs.promises.access(filePath);
-            } catch {
-                // File doesn't exist, this is a new file creation, not a replacement
-                Logger.log(`File ${fileEdit.filePath} doesn't exist yet (new file)`);
-                return false;
-            }
-
-            const content = await fs.promises.readFile(filePath, 'utf-8');
-            const lines = content.split('\n');
-
-            // Calculate total lines that would be changed
-            let totalLinesChanged = 0;
-            for (const edit of fileEdit.edits) {
-                const lineCount = edit.endLine - edit.startLine;
-                totalLinesChanged += Math.max(1, lineCount);
-            }
-
-            // More lenient validation: only reject if >95% AND >100 lines
-            const fileLineCount = lines.length;
-            const changeRatio = totalLinesChanged / fileLineCount;
-
-            // Allow small files to be edited more freely
-            if (fileLineCount <= 30) {
-                return false;  // Allow any edits for small files
-            }
-
-            // Only reject very large changes in big files
-            if (changeRatio > 0.95 && totalLinesChanged > 100) {
-                Logger.warn(`Suspicious edit: ${totalLinesChanged}/${fileLineCount} lines (${(changeRatio * 100).toFixed(1)}%) in ${fileEdit.filePath}`);
-                Logger.warn('Rejecting to prevent accidental full file replacement');
-                return true;
-            }
-
-            return false;
-        } catch (error) {
-            Logger.warn('Could not validate file edit:', error);
-            return false;
-        }
     }
 
     /**

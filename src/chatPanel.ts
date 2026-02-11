@@ -764,16 +764,46 @@ ${gitDiffContent}${terminalContent}
                 const endLine = edit.endLine;
 
                 // Read the file to get context
-                const workspaceRoot = this.fileManager.getWorkspaceRoot();
+                const workspaceRoot = await this.fileManager.getWorkspaceRoot();
                 const fullPath = path.join(workspaceRoot, filePath);
-                const content = originalContent || fs.readFileSync(fullPath, 'utf-8');
-                const lines = content.split('\n');
+
+                let content: string;
+                let lines: string[];
+
+                try {
+                    // Try to read the file
+                    if (originalContent) {
+                        content = originalContent;
+                    } else {
+                        content = fs.readFileSync(fullPath, 'utf-8');
+                    }
+                    lines = content.split('\n');
+                } catch (fileError: any) {
+                    // File might not exist or can't be read
+                    Logger.warn(`Could not read file ${filePath}: ${fileError.message}`);
+
+                    // Show preview without context
+                    preview += `${filePath} (new file):\n`;
+                    const newLines = edit.newContent.split('\n');
+                    for (const newLine of newLines) {
+                        preview += `+ ${newLine}\n`;
+                    }
+                    preview += '\n';
+                    continue;
+                }
+
+                // Validate line numbers
+                if (startLine < 0 || startLine >= lines.length) {
+                    Logger.warn(`Invalid startLine ${startLine} for file ${filePath} with ${lines.length} lines`);
+                    preview += `${filePath}: Line ${startLine}\n+ ${edit.newContent}\n\n`;
+                    continue;
+                }
 
                 // Context: show 2 lines before and after
                 const contextBefore = Math.max(0, startLine - 2);
                 const contextAfter = Math.min(lines.length, endLine + 3);
 
-                preview += `Line ${startLine}${startLine !== endLine ? `-${endLine}` : ''}:\n`;
+                preview += `${filePath} Line ${startLine}${startLine !== endLine ? `-${endLine}` : ''}:\n`;
 
                 // Show context before (2 lines)
                 for (let i = contextBefore; i < startLine; i++) {
@@ -808,7 +838,7 @@ ${gitDiffContent}${terminalContent}
             return preview || 'No changes preview available';
         } catch (error: any) {
             Logger.error('Error generating diff preview:', error);
-            return 'Error generating preview';
+            return `Error: ${error.message}`;
         }
     }
 

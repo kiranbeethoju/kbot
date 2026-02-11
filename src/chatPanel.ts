@@ -40,6 +40,7 @@ export class ChatPanelProvider implements vscode.WebviewViewProvider {
     private currentSession: ChatSession | null = null;
     private abortController: AbortController | null = null;
     private structuredEditManager?: StructuredEditManager;
+    private previewOriginalContent?: Map<string, string>;  // Store original content for preview revert
 
     constructor(
         private extensionUri: vscode.Uri,
@@ -132,6 +133,12 @@ export class ChatPanelProvider implements vscode.WebviewViewProvider {
                         break;
                     case 'applySingleChange':
                         await this.applySingleChange(data.file, data.userMessage);
+                        break;
+                    case 'previewChange':
+                        await this.previewChange(data.file);
+                        break;
+                    case 'revertPreview':
+                        await this.revertPreview(data.path);
                         break;
                     case 'openFile':
                         await this.openFile(data.path);
@@ -1031,6 +1038,104 @@ ${gitDiffContent}${terminalContent}
             }
         } catch (error: any) {
             vscode.window.showErrorMessage(`Failed to apply change to ${file.path}: ${error.message}`);
+        }
+    }
+
+    /**
+     * Preview a file change (Cursor-style - show in editor, don't save yet)
+     */
+    private async previewChange(file: { path: string; edits?: any[]; isStructured?: boolean }): Promise<void> {
+        try {
+            if (!file.isStructured || !file.edits || !this.structuredEditManager) {
+                vscode.window.showWarningMessage('Preview only available for structured edits');
+                return;
+            }
+
+            // Store original content for revert
+            const workspaceFolders = vscode.workspace.workspaceFolders;
+            if (!workspaceFolders) {
+                throw new Error('No workspace folder found');
+            }
+
+            const fullPath = path.join(workspaceFolders[0].uri.fsPath, file.path);
+            const uri = vscode.Uri.file(fullPath);
+
+            // Read and store original content
+            const originalContent = await vscode.workspace.fs.readFile(uri);
+            const originalText = Buffer.from(originalContent).toString('utf-8');
+
+            // Store in a map for revert
+            if (!this.previewOriginalContent) {
+                this.previewOriginalContent = new Map<string, string>();
+            }
+            this.previewOriginalContent.set(file.path, originalText);
+
+            // Open the file in editor
+            const doc = await vscode.workspace.openTextDocument(uri);
+            const editor = await vscode.window.showTextDocument(doc);
+
+            // Apply edits to the document (NOT saved to disk yet)
+            const edit = new vscode.WorkspaceEdit();
+
+            for (const lineEdit of file.edits) {
+                const endLineNumber = lineEdit.endLine > lineEdit.startLine
+                    ? lineEdit.endLine
+                    : lineEdit.startLine + 1;
+
+                const range = new vscode.Range(
+                    new vscode.Position(lineEdit.startLine, 0),
+                    new vscode.Position(endLineNumber, 0)
+                );
+
+                edit.replace(uri, range, lineEdit.newContent);
+            }
+
+            await vscode.workspace.applyEdit(edit);
+
+            vscode.window.showInformationMessage(`Preview: Changes shown in ${file.path} (not saved yet). Click Accept to save, or Revert to undo.`);
+        } catch (error: any) {
+            vscode.window.showErrorMessage(`Failed to preview ${file.path}: ${error.message}`);
+        }
+    }
+
+    /**
+     * Revert preview (restore original content without saving)
+     */
+    private async revertPreview(filePath: string): Promise<void> {
+        try {
+            if (!this.previewOriginalContent || !this.previewOriginalContent.has(filePath)) {
+                vscode.window.showWarningMessage('No preview to revert for this file');
+                return;
+            }
+
+            const originalContent = this.previewOriginalContent.get(filePath);
+            if (!originalContent) {
+                return;
+            }
+
+            const workspaceFolders = vscode.workspace.workspaceFolders;
+            if (!workspaceFolders) {
+                throw new Error('No workspace folder found');
+            }
+
+            const fullPath = path.join(workspaceFolders[0].uri.fsPath, filePath);
+            const uri = vscode.Uri.file(fullPath);
+
+            // Write original content back
+            const encoder = new TextEncoder();
+            await vscode.workspace.fs.writeFile(uri, encoder.encode(originalContent));
+
+            // Reload the document if it's open
+            const doc = vscode.workspace.textDocuments.find(d => d.uri.fsPath === fullPath);
+            if (doc) {
+                await vscode.commands.executeCommand('workbench.action.files.revert');
+            }
+
+            this.previewOriginalContent.delete(filePath);
+
+            vscode.window.showInformationMessage(`Reverted changes to ${filePath}`);
+        } catch (error: any) {
+            vscode.window.showErrorMessage(`Failed to revert ${filePath}: ${error.message}`);
         }
     }
 
@@ -2548,14 +2653,18 @@ function addFileChanges(files, userMessage) {
         const actionsDiv = document.createElement('div');
         actionsDiv.className = 'file-change-actions';
 
-        // Preview button
+        // Preview button (Cursor-style - show in editor, don't save)
         const previewBtn = document.createElement('button');
         previewBtn.textContent = 'Preview';
         previewBtn.onclick = () => {
-            const previewDiv = document.getElementById('preview-' + index);
-            if (previewDiv) {
-                previewDiv.classList.toggle('show');
-            }
+            previewSingleChange(file.path);
+        };
+
+        // Revert button (undo preview without saving)
+        const revertBtn = document.createElement('button');
+        revertBtn.textContent = 'Revert';
+        revertBtn.onclick = () => {
+            revertPreview(file.path);
         };
 
         // View button
@@ -2573,6 +2682,7 @@ function addFileChanges(files, userMessage) {
         };
 
         actionsDiv.appendChild(previewBtn);
+        actionsDiv.appendChild(revertBtn);
         actionsDiv.appendChild(viewBtn);
         actionsDiv.appendChild(acceptBtn);
 
@@ -2700,6 +2810,31 @@ function addMessage(message) {
             } else {
                 console.error('File not found in currentFiles:', path);
             }
+        }
+
+        // Preview a single file change (Cursor-style - show in editor, don't save yet)
+        function previewSingleChange(path) {
+            const file = currentFiles.find(f => f.path === path);
+            if (file) {
+                vscode.postMessage({
+                    type: 'previewChange',
+                    file: {
+                        path: file.path,
+                        edits: file.edits,
+                        isStructured: file.isStructured
+                    }
+                });
+            } else {
+                console.error('File not found in currentFiles:', path);
+            }
+        }
+
+        // Revert preview (undo unsaved changes)
+        function revertPreview(path) {
+            vscode.postMessage({
+                type: 'revertPreview',
+                path: path
+            });
         }
 
         // Accept all file changes

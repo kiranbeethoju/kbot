@@ -1051,7 +1051,6 @@ ${gitDiffContent}${terminalContent}
                 return;
             }
 
-            // Store original content for revert
             const workspaceFolders = vscode.workspace.workspaceFolders;
             if (!workspaceFolders) {
                 throw new Error('No workspace folder found');
@@ -1060,15 +1059,38 @@ ${gitDiffContent}${terminalContent}
             const fullPath = path.join(workspaceFolders[0].uri.fsPath, file.path);
             const uri = vscode.Uri.file(fullPath);
 
-            // Read and store original content
-            const originalContent = await vscode.workspace.fs.readFile(uri);
-            const originalText = Buffer.from(originalContent).toString('utf-8');
+            // Check if file exists
+            let originalText = '';
+            let fileExists = false;
+
+            try {
+                const originalContent = await vscode.workspace.fs.readFile(uri);
+                originalText = Buffer.from(originalContent).toString('utf-8');
+                fileExists = true;
+            } catch {
+                // File doesn't exist, that's okay for new files
+                Logger.log(`File ${file.path} doesn't exist yet (new file creation)`);
+                originalText = '';
+                fileExists = false;
+            }
 
             // Store in a map for revert
             if (!this.previewOriginalContent) {
                 this.previewOriginalContent = new Map<string, string>();
             }
             this.previewOriginalContent.set(file.path, originalText);
+
+            // If file doesn't exist, create it with empty content first
+            if (!fileExists) {
+                try {
+                    const encoder = new TextEncoder();
+                    await vscode.workspace.fs.writeFile(uri, encoder.encode(''));
+                    Logger.log(`Created new file: ${file.path}`);
+                } catch (error: any) {
+                    vscode.window.showErrorMessage(`Failed to create ${file.path}: ${error.message}`);
+                    return;
+                }
+            }
 
             // Open the file in editor
             const doc = await vscode.workspace.openTextDocument(uri);
@@ -1092,7 +1114,8 @@ ${gitDiffContent}${terminalContent}
 
             await vscode.workspace.applyEdit(edit);
 
-            vscode.window.showInformationMessage(`Preview: Changes shown in ${file.path} (not saved yet). Click Accept to save, or Revert to undo.`);
+            const fileStatus = fileExists ? 'Changes shown (not saved yet)' : 'New file created (not saved yet)';
+            vscode.window.showInformationMessage(`Preview: ${file.path} - ${fileStatus}. Click Accept to save, or Revert to undo.`);
         } catch (error: any) {
             vscode.window.showErrorMessage(`Failed to preview ${file.path}: ${error.message}`);
         }
@@ -1109,9 +1132,6 @@ ${gitDiffContent}${terminalContent}
             }
 
             const originalContent = this.previewOriginalContent.get(filePath);
-            if (!originalContent) {
-                return;
-            }
 
             const workspaceFolders = vscode.workspace.workspaceFolders;
             if (!workspaceFolders) {
@@ -1121,19 +1141,33 @@ ${gitDiffContent}${terminalContent}
             const fullPath = path.join(workspaceFolders[0].uri.fsPath, filePath);
             const uri = vscode.Uri.file(fullPath);
 
-            // Write original content back
-            const encoder = new TextEncoder();
-            await vscode.workspace.fs.writeFile(uri, encoder.encode(originalContent));
+            // Check if this was a new file (empty original content)
+            const isNewFile = originalContent === '';
 
-            // Reload the document if it's open
-            const doc = vscode.workspace.textDocuments.find(d => d.uri.fsPath === fullPath);
-            if (doc) {
-                await vscode.commands.executeCommand('workbench.action.files.revert');
+            if (isNewFile) {
+                // Delete the new file that was created during preview
+                try {
+                    await vscode.workspace.fs.delete(uri);
+                    Logger.log(`Deleted new file: ${filePath}`);
+                    vscode.window.showInformationMessage(`Reverted: Deleted new file ${filePath}`);
+                } catch (error: any) {
+                    vscode.window.showWarningMessage(`Could not delete ${filePath}: ${error.message}`);
+                }
+            } else {
+                // Restore original content
+                const encoder = new TextEncoder();
+                await vscode.workspace.fs.writeFile(uri, encoder.encode(originalContent));
+
+                // Reload the document if it's open
+                const doc = vscode.workspace.textDocuments.find(d => d.uri.fsPath === fullPath);
+                if (doc) {
+                    await vscode.commands.executeCommand('workbench.action.files.revert');
+                }
+
+                vscode.window.showInformationMessage(`Reverted changes to ${filePath}`);
             }
 
             this.previewOriginalContent.delete(filePath);
-
-            vscode.window.showInformationMessage(`Reverted changes to ${filePath}`);
         } catch (error: any) {
             vscode.window.showErrorMessage(`Failed to revert ${filePath}: ${error.message}`);
         }

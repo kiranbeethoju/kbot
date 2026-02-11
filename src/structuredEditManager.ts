@@ -85,6 +85,16 @@ export class StructuredEditManager {
     private async isFullFileReplacement(fileEdit: FileStructuredEdit): Promise<boolean> {
         try {
             const filePath = path.join(this.workspaceRoot, fileEdit.filePath);
+
+            // Check if file exists
+            try {
+                await fs.promises.access(filePath);
+            } catch {
+                // File doesn't exist, this is a new file creation, not a replacement
+                Logger.log(`File ${fileEdit.filePath} doesn't exist yet (new file)`);
+                return false;
+            }
+
             const content = await fs.promises.readFile(filePath, 'utf-8');
             const lines = content.split('\n');
 
@@ -95,12 +105,19 @@ export class StructuredEditManager {
                 totalLinesChanged += Math.max(1, lineCount);
             }
 
-            // If changing more than 80% of the file or more than 50 lines, reject
+            // More lenient validation: only reject if >95% AND >100 lines
             const fileLineCount = lines.length;
             const changeRatio = totalLinesChanged / fileLineCount;
 
-            if (changeRatio > 0.8 || totalLinesChanged > 50) {
+            // Allow small files to be edited more freely
+            if (fileLineCount <= 30) {
+                return false;  // Allow any edits for small files
+            }
+
+            // Only reject very large changes in big files
+            if (changeRatio > 0.95 && totalLinesChanged > 100) {
                 Logger.warn(`Suspicious edit: ${totalLinesChanged}/${fileLineCount} lines (${(changeRatio * 100).toFixed(1)}%) in ${fileEdit.filePath}`);
+                Logger.warn('Rejecting to prevent accidental full file replacement');
                 return true;
             }
 

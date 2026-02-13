@@ -864,14 +864,21 @@ ${gitDiffContent}${terminalContent}
 
             if (isStructured) {
                 // Transform to FileStructuredEdit format
+                // IMPORTANT: Use edits array only, never use content field for structured edits
+                // The content field contains diff preview with +/- markers, not actual content
                 const structuredEdits: FileStructuredEdit[] = files
-                    .filter(f => f.isStructured || f.edits)
+                    .filter(f => (f.isStructured || f.edits) && f.edits && Array.isArray(f.edits))
                     .map(f => ({
                         filePath: f.path,
                         edits: f.edits || []
                     }));
 
-                // Apply structured edits
+                if (structuredEdits.length === 0) {
+                    vscode.window.showWarningMessage('No valid structured edits to apply');
+                    return;
+                }
+
+                // Apply structured edits using the edits array (not content field)
                 await this.applyStructuredEdits(structuredEdits);
             } else {
                 // Legacy format - apply old method
@@ -988,8 +995,10 @@ ${gitDiffContent}${terminalContent}
     ): Promise<void> {
         try {
             // Check if this is a structured edit
-            if (file.isStructured && file.edits && this.structuredEditManager) {
-                // Apply structured edit
+            // IMPORTANT: For structured edits, only use the edits array, never the content field
+            // The content field contains diff preview with +/- markers, not actual content
+            if (file.isStructured && file.edits && Array.isArray(file.edits) && file.edits.length > 0 && this.structuredEditManager) {
+                // Apply structured edit using edits array only
                 const structuredFile: FileStructuredEdit = {
                     filePath: file.path,
                     edits: file.edits

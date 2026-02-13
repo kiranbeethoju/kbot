@@ -2,7 +2,7 @@
 
 **Author:** Kiran Beethoju
 **License:** MIT
-**Version:** 1.4.0
+**Version:** 1.6.8
 
 A Cursor-like AI coding assistant powered by Azure OpenAI, NVIDIA, Anthropic Foundry, and Z.AI. Built for developers who want intelligent code assistance with shell command execution capabilities without compromising privacy.
 
@@ -508,6 +508,21 @@ MIT License - See LICENSE file for details
 ---
 
 ## Changelog
+
+### 1.6.8 (2025-02-13)
+
+**FIX: Critical - Diff Markers Written to Files**
+- Fixed issue where diff preview markers (+/-) were being written to actual Python files
+- Enhanced validation in `applyChanges` and `applySingleChange` functions
+- Added checks to ensure only valid structured edits (edits array) are applied
+- Added early return with warning if no valid edits found
+- Improved error messages for invalid structured edits
+
+**Technical Details:**
+- Root cause: The `content` field contained diff preview for UI display
+- Fix: Ensure only `edits` array is used for structured edits, never `content` field
+- Added validation: Check `edits` is a non-empty array before processing
+- Added comments explaining the separation between display content and actual edits
 
 ### 1.6.7 (2025-02-13)
 

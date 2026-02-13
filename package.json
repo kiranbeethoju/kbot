@@ -2,11 +2,11 @@
   "name": "kbot",
   "displayName": "KBot",
   "description": "Cursor-like AI coding assistant powered by Azure OpenAI, NVIDIA, Anthropic Foundry, and Z.AI. 100% local - no telemetry, no cloud storage. Your code never leaves your machine except for AI provider API calls.",
-  "version": "1.6.5",
+  "version": "1.6.7",
   "publisher": "KiranBeethojuAIplugins",
   "author": "Kiran Beethoju",
   "license": "MIT",
-  "icon": "logo.png",
+  "icon": "kbot.png",
   "type": "commonjs",
   "engines": {
     "vscode": "^1.75.0"
@@ -70,7 +70,7 @@
         {
           "id": "kbot-sidebar",
           "title": "KBot",
-          "icon": "resources/icon.svg"
+          "icon": "kbot.png"
         }
       ]
     },

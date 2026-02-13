@@ -327,7 +327,79 @@ kbot/
 - All file changes previewed before applying
 - Open source - inspect all code
 
-## Development
+## Contributing
+
+We welcome contributions from external developers! This project is open source and community-driven.
+
+### How to Contribute
+
+#### For External Developers
+
+If you're an external developer wanting to contribute:
+
+1. **Fork the Repository**
+   ```bash
+   # Fork https://github.com/kiranbeethoju/kbot on GitHub
+   # Then clone your fork
+   git clone https://github.com/YOUR_USERNAME/kbot.git
+   cd kbot
+   ```
+
+2. **Create a Feature Branch**
+   ```bash
+   git checkout -b feature/your-feature-name
+   # or for bug fixes
+   git checkout -b fix/your-bug-fix
+   ```
+
+3. **Make Your Changes**
+   - Write clean, documented code
+   - Follow TypeScript best practices
+   - Test your changes thoroughly
+   - Update documentation if needed
+
+4. **Commit Your Changes**
+   ```bash
+   git add .
+   git commit -m "feat: descriptive message about your feature"
+   ```
+
+   Commit message format:
+   - `feat:` - New features
+   - `fix:` - Bug fixes
+   - `docs:` - Documentation changes
+   - `refactor:` - Code refactoring
+   - `test:` - Adding or updating tests
+   - `chore:` - Maintenance tasks
+
+5. **Push to Your Fork**
+   ```bash
+   git push origin feature/your-feature-name
+   ```
+
+6. **Create a Pull Request**
+   - Go to https://github.com/kiranbeethoju/kbot
+   - Click "Pull Requests" → "New Pull Request"
+   - Select your feature branch
+   - Fill in the PR template
+   - Submit your PR for review
+
+#### For Maintainers
+
+Pushing new features to the beta branch:
+
+```bash
+# Make your changes
+git checkout -b feature/your-feature
+# ... make changes ...
+git add .
+git commit -m "feat: description"
+
+# Push to beta branch
+git push origin feature/your-feature:beta
+```
+
+### Development Setup
 
 ```bash
 # Install dependencies
@@ -343,8 +415,41 @@ npm run compile
 npm run package
 
 # Install locally for testing
-code --install-extension kbot-1.4.0.vsix
+code --install-extension kbot-1.6.7.vsix
 ```
+
+### Code Style Guidelines
+
+- Use TypeScript for all new code
+- Follow existing code patterns and structure
+- Add JSDoc comments for public functions
+- Use meaningful variable and function names
+- Keep functions focused and concise
+- Add error handling for user-facing features
+
+### Testing Your Changes
+
+1. Test in a clean VS Code environment
+2. Test with different AI providers (Azure, NVIDIA, Anthropic, Z.AI)
+3. Test file operations (create, edit, delete)
+4. Test shell command execution
+5. Test with various file types and sizes
+
+### Pull Request Guidelines
+
+- **One PR per feature/fix** - Keep PRs focused
+- **Clear description** - Explain what and why
+- **Tests included** - Add tests for new functionality
+- **Documentation updated** - Update README if needed
+- **No merge commits** - Use rebase to keep history clean
+
+### Getting Your PR Merged
+
+1. Ensure all CI checks pass
+2. Respond to review comments promptly
+3. Make requested changes or discuss alternatives
+4. Keep PRs up to date with main branch
+5. Be patient - maintainers review as time allows
 
 ## License
 
@@ -356,7 +461,66 @@ MIT License - See LICENSE file for details
 
 - GitHub: [@kiranbeethoju](https://github.com/kiranbeethoju)
 
+## Upcoming Features (TODO)
+
+### High Priority
+
+- [ ] **Multi-file Edit Support** - Apply changes across multiple files simultaneously
+- [ ] **Streaming File Preview** - Show file changes in real-time as they're generated
+- [ ] **Git Branch Integration** - Show current branch and allow switching from chat
+- [ ] **Enhanced Diff View** - Side-by-side comparison for file changes
+- [ ] **Syntax Highlighting** - Proper code syntax highlighting in chat responses
+- [ ] **Context Window Management** - Better handling of large codebases with smart context selection
+- [ ] **Code Review Mode** - Automated code review with suggestions for improvements
+- [ ] **Refactoring Assistant** - AI-powered refactoring with safety checks
+
+### Medium Priority
+
+- [ ] **Workspace Templates** - Predefined prompts for common tasks
+- [ ] **Chat Export to Markdown** - Export conversations as formatted markdown
+- [ ] **Multi-language Support** - Internationalization for non-English users
+- [ ] **Custom Keybindings** - Allow users to configure keyboard shortcuts
+- [ ] **Performance Metrics** - Show token usage and costs per session
+- [ ] **Session Persistence** - Save and restore chat sessions across VS Code restarts
+- [ ] **Code Snippet Library** - Save and reuse code snippets
+- [ ] **Integrated Terminal** - Dedicated terminal panel in the chat view
+
+### Low Priority
+
+- [ ] **Dark/Light Theme Sync** - Automatic theme matching with VS Code
+- [ ] **Voice Input** - Dictate prompts instead of typing
+- [ ] **Collaboration Mode** - Share chat sessions with team members
+- [ ] **Analytics Dashboard** - Usage statistics and insights
+- [ ] **Plugin System** - Allow third-party extensions to KBot
+- [ ] **Desktop Notifications** - Notify on long-running operations
+- [ ] **Custom Model Parameters** - Fine-tune temperature, max tokens, etc.
+- [ ] **Batch Operations** - Apply same change to multiple files at once
+
+### Under Consideration
+
+- [ ] **Local Model Support** - Integration with local LLMs (Ollama, LM Studio)
+- [ ] **Multi-cloud Support** - AWS Bedrock, Google Cloud Vertex AI
+- [ ] **Team Edition** - Shared credentials and configurations for teams
+- [ ] **Enterprise Features** - SSO, audit logs, compliance features
+- [ ] **Mobile App** - Companion mobile application
+- [ ] **VS Code Fork** - Standalone editor with KBot built-in
+
+---
+
 ## Changelog
+
+### 1.6.7 (2025-02-13)
+
+**NEW: Revert to Checkpoint**
+- Added ability to revert all changes made after a specific user message
+- One-click rollback to any point in conversation history
+- Preserves conversation context while undoing file changes
+- Safe restoration using stored original content
+
+**Improvements:**
+- Enhanced file change tracking with original content storage
+- Better backup management for rollbacks
+- Improved state management for undo operations
 
 ### 1.4.0 (2025-02-08)
 

@@ -140,6 +140,9 @@ export class ChatPanelProvider implements vscode.WebviewViewProvider {
                     case 'revertPreview':
                         await this.revertPreview(data.path);
                         break;
+                    case 'revertToCheckpoint':
+                        await this.revertToCheckpoint(data.messageId);
+                        break;
                     case 'openFile':
                         await this.openFile(data.path);
                         break;
@@ -1174,6 +1177,104 @@ ${gitDiffContent}${terminalContent}
     }
 
     /**
+     * Revert to checkpoint - undo all changes made after a specific user message
+     * Uses stored originalContent from file changes
+     */
+    private async revertToCheckpoint(messageId: string): Promise<void> {
+        try {
+            if (!this.currentSession) {
+                vscode.window.showWarningMessage('No active session found');
+                return;
+            }
+
+            // Find the target message
+            const targetMessage = this.currentSession.messages.find(m => m.id === messageId);
+            if (!targetMessage) {
+                vscode.window.showWarningMessage('Message not found');
+                return;
+            }
+
+            // Get the timestamp of the target message
+            const targetTimestamp = targetMessage.timestamp;
+
+            // Find all messages after the target message that have files
+            const messagesAfter = this.currentSession.messages.filter(m =>
+                m.timestamp > targetTimestamp && m.files && m.files.length > 0
+            );
+
+            if (messagesAfter.length === 0) {
+                vscode.window.showInformationMessage('No file changes to revert after this message');
+                return;
+            }
+
+            const workspaceFolders = vscode.workspace.workspaceFolders;
+            if (!workspaceFolders) {
+                vscode.window.showWarningMessage('No workspace folder found');
+                return;
+            }
+
+            let revertedCount = 0;
+
+            // Revert all file changes using stored originalContent
+            for (const msg of messagesAfter) {
+                if (msg.files) {
+                    for (const file of msg.files) {
+                        try {
+                            const fullPath = path.join(workspaceFolders[0].uri.fsPath, file.path);
+                            const uri = vscode.Uri.file(fullPath);
+
+                            if (file.action === 'create') {
+                                // Delete newly created files
+                                try {
+                                    await vscode.workspace.fs.delete(uri);
+                                    Logger.log(`Deleted new file: ${file.path}`);
+                                    revertedCount++;
+                                } catch (error: any) {
+                                    Logger.warn(`Could not delete ${file.path}: ${error.message}`);
+                                }
+                            } else if (file.action === 'delete') {
+                                // Restore deleted files if we have original content
+                                if (file.originalContent) {
+                                    const encoder = new TextEncoder();
+                                    await vscode.workspace.fs.writeFile(uri, encoder.encode(file.originalContent));
+                                    Logger.log(`Restored deleted file: ${file.path}`);
+                                    revertedCount++;
+                                }
+                            } else if (file.action === 'update') {
+                                // Restore original content for modified files
+                                if (file.originalContent !== undefined) {
+                                    const encoder = new TextEncoder();
+                                    await vscode.workspace.fs.writeFile(uri, encoder.encode(file.originalContent));
+
+                                    // Reload the document if it's open
+                                    const doc = vscode.workspace.textDocuments.find(d => d.uri.fsPath === fullPath);
+                                    if (doc) {
+                                        await vscode.commands.executeCommand('workbench.action.files.revert');
+                                    }
+
+                                    Logger.log(`Reverted file: ${file.path}`);
+                                    revertedCount++;
+                                }
+                            }
+                        } catch (error: any) {
+                            Logger.warn(`Error reverting ${file.path}: ${error.message}`);
+                        }
+                    }
+                }
+            }
+
+            if (revertedCount > 0) {
+                vscode.window.showInformationMessage(`Reverted ${revertedCount} file(s) to checkpoint`);
+            } else {
+                vscode.window.showInformationMessage('No files were reverted');
+            }
+        } catch (error: any) {
+            vscode.window.showErrorMessage(`Failed to revert to checkpoint: ${error.message}`);
+            Logger.error('Revert to checkpoint error:', error);
+        }
+    }
+
+    /**
      * Open a file in the editor
      */
     private async openFile(filePath: string): Promise<void> {
@@ -1522,6 +1623,37 @@ ${gitDiffContent}${terminalContent}
         .message-content {
             white-space: pre-wrap;
             overflow-x: auto;
+        }
+
+        .message-revert-icon {
+            position: absolute;
+            right: 8px;
+            top: 8px;
+            background: transparent;
+            border: none;
+            color: var(--vscode-descriptionForeground);
+            cursor: pointer;
+            font-size: 16px;
+            padding: 4px;
+            border-radius: 3px;
+            opacity: 0;
+            transition: opacity 0.2s, color 0.2s;
+            line-height: 1;
+            z-index: 10;
+        }
+
+        .message:hover .message-revert-icon {
+            opacity: 1;
+        }
+
+        .message-revert-icon:hover {
+            color: var(--vscode-foreground);
+            background: var(--vscode-toolbar-hoverBackground);
+        }
+
+        .message {
+            position: relative;
+            padding-right: 35px;
         }
 
         .message-content p {
@@ -2701,13 +2833,6 @@ function addFileChanges(files, userMessage) {
             revertPreview(file.path);
         };
 
-        // View button
-        const viewBtn = document.createElement('button');
-        viewBtn.textContent = 'View';
-        viewBtn.onclick = () => {
-            openFile(file.path);
-        };
-
         // Accept button
         const acceptBtn = document.createElement('button');
         acceptBtn.textContent = 'Accept';
@@ -2717,7 +2842,6 @@ function addFileChanges(files, userMessage) {
 
         actionsDiv.appendChild(previewBtn);
         actionsDiv.appendChild(revertBtn);
-        actionsDiv.appendChild(viewBtn);
         actionsDiv.appendChild(acceptBtn);
 
         // Preview section
@@ -2792,6 +2916,24 @@ function addMessage(message) {
         messageDiv.className = 'message ' + message.role;
         if (message.id) {
             messageDiv.setAttribute('data-message-id', message.id);
+        }
+
+        // Add revert-to-checkpoint icon for user messages
+        if (message.role === 'user') {
+            const revertIcon = document.createElement('button');
+            revertIcon.className = 'message-revert-icon';
+            revertIcon.innerHTML = '&#8634;'; // ↻ (clockwise open circle arrow)
+            revertIcon.title = 'Revert to this point - undo all changes after this message';
+            revertIcon.onclick = (e) => {
+                e.stopPropagation();
+                if (confirm('Revert all changes made after this message? This will undo file changes.')) {
+                    vscode.postMessage({
+                        type: 'revertToCheckpoint',
+                        messageId: message.id
+                    });
+                }
+            };
+            messageDiv.appendChild(revertIcon);
         }
 
         // Render markdown for assistant messages, plain text for user

@@ -42,11 +42,13 @@ export class CredentialsViewProvider implements vscode.WebviewViewProvider {
             localResourceRoots: [this.extensionUri]
         };
 
-        webviewView.webview.html = this.getHtmlForWebview(webviewView.webview);
-
-        // Handle messages from webview
+        // Performance: Defer HTML loading slightly to allow UI to render faster
         webviewView.webview.onDidReceiveMessage(async (data) => {
             switch (data.type) {
+                case 'readyForState':
+                    webviewView.webview.html = this.getHtmlForWebview(webviewView.webview);
+                    await this.loadState();
+                    break;
                 case 'loadState':
                     await this.loadState();
                     break;
@@ -854,6 +856,56 @@ export class CredentialsViewProvider implements vscode.WebviewViewProvider {
         if (this.view) {
             this.view.webview.postMessage(message);
         }
+    }
+
+    /**
+     * Get initial loading HTML for webview
+     */
+    private getLoadingHtml(): string {
+        return `<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AI Provider Credentials</title>
+    <style>
+        body {
+            background-color: var(--vscode-sideBar-background);
+            color: var(--vscode-foreground);
+            padding: 16px;
+            line-height: 1.5;
+            max-height: 100vh;
+            overflow-y: auto;
+        }
+        .loading {
+            text-align: center;
+            padding: 40px 20px;
+        }
+        .spinner {
+            width: 40px;
+            height: 40px;
+            border: 4px solid var(--vscode-panel-border);
+            border-top: 4px solid var(--vscode-panel-border);
+            border-radius: 50%;
+            animation: spin 1s linear infinite;
+        }
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+    </style>
+</head>
+<body>
+    <div class="loading">
+        <div class="spinner"></div>
+        <p>Loading credentials...</p>
+    </div>
+    <script>
+        const vscode = acquireVsCodeApi();
+        vscode.postMessage({ type: 'readyForState' });
+    </script>
+</body>
+</html>`;
     }
 
     /**

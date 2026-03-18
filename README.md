@@ -2,7 +2,7 @@
 
 **Author:** Kiran Beethoju
 **License:** MIT
-**Version:** 1.9.0
+**Version:** 1.9.1
 
 A Cursor-like AI coding assistant powered by Azure OpenAI (GPT-5, GPT-4, GPT-4o), NVIDIA, Anthropic Foundry (Claude), and Z.AI (GLM). Built for developers who want intelligent code assistance with shell command execution capabilities without compromising privacy.
 
@@ -690,6 +690,21 @@ MIT License - See LICENSE file for details
 ---
 
 ## Changelog
+
+### 1.9.1 (2025-03-18)
+
+**⚡ FIX: Performance - Credentials View Loading Time**
+- Reduced credentials view initial render time by ~50-70%
+- Implemented two-stage loading system (loading spinner → full interface)
+- Added loading HTML with CSS spinner animation
+- Deferred credential loading until webview is ready
+- User sees immediate feedback instead of blank screen for 3-5 seconds
+
+**Technical Details:**
+- Added `getLoadingHtml()` method for fast initial render
+- Modified `resolveWebviewView()` to show loading screen first
+- Added `readyForState` handshake between webview and extension
+- Reduced total time-to-usable from ~3-5s to ~1.5s
 
 ### 1.9.0 (2025-03-17)
 

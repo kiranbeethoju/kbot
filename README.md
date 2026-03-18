@@ -2,14 +2,18 @@
 
 **Author:** Kiran Beethoju
 **License:** MIT
-**Version:** 1.6.8
+**Version:** 1.9.0
 
-A Cursor-like AI coding assistant powered by Azure OpenAI, NVIDIA, Anthropic Foundry, and Z.AI. Built for developers who want intelligent code assistance with shell command execution capabilities without compromising privacy.
+A Cursor-like AI coding assistant powered by Azure OpenAI (GPT-5, GPT-4, GPT-4o), NVIDIA, Anthropic Foundry (Claude), and Z.AI (GLM). Built for developers who want intelligent code assistance with shell command execution capabilities without compromising privacy.
 
 ## Features
 
 ✅ **100% Local** - No telemetry, no cloud storage, no data tracking
 ✅ **Multiple Provider Support** - Azure OpenAI, NVIDIA, Anthropic Foundry, Z.AI (GLM)
+✅ **Intelligent Orchestration** - Advanced context management for large codebases
+✅ **Smart Memory Retrieval** - Semantic search across conversation history
+✅ **Hierarchical Summarization** - Automatically compress large context while preserving key information
+✅ **Output Continuation** - Extends responses beyond model token limits
 ✅ **Shell Command Execution** - AI can run terminal commands automatically
 ✅ **Context-Aware** - Understands your entire codebase
 ✅ **Git Integration** - Auto-commit changes with AI attribution
@@ -21,6 +25,9 @@ A Cursor-like AI coding assistant powered by Azure OpenAI, NVIDIA, Anthropic Fou
 ✅ **File Exclusions** - Manage which files to exclude from context
 ✅ **Multi-Provider Support** - Switch between Azure, NVIDIA, Anthropic Foundry, and Z.AI
 ✅ **Manual Workspace Configuration** - Set custom workspace directory
+✅ **AI Code Review** - Automated code review with GitHub PR integration
+✅ **GitHub Integration** - PR status checks and comments
+✅ **Custom Review Rules** - Configure review criteria per repository
 
 ## Privacy First
 
@@ -33,6 +40,80 @@ This extension is designed with privacy as the top priority:
 - ✅ **Transparent** - Open source, inspect all code
 
 Your code never leaves your machine except for API calls to your configured provider.
+
+## 🆕 Intelligent Orchestration Layer (v1.8.0)
+
+KBot now includes an advanced orchestration layer that provides Cursor-level intelligence for handling large codebases and long conversations.
+
+### Key Features
+
+#### 🧠 Smart Context Management
+- **Automatic Token Tracking**: Monitors context window limits for each model
+- **Dynamic Adaptation**: Adjusts content based on model capabilities (GPT-4, Claude, GLM, etc.)
+- **Safety Buffers**: Uses 80% of context window to prevent truncation
+
+#### 📦 Hierarchical Summarization
+- **Large File Handling**: Automatically summarizes files that exceed context limits
+- **Key Information Preservation**: Maintains critical logic, functions, and implementation details
+- **Multi-level Compression**: Recursively summarizes until content fits
+
+#### 💾 Semantic Memory Retrieval
+- **RAG-style Search**: Finds relevant past conversations using semantic similarity
+- **Context Boosting**: Prioritizes memories related to current files
+- **Automatic Storage**: Saves code decisions, error fixes, and summaries
+
+#### 🔄 Output Continuation
+- **Beyond Token Limits**: Automatically continues responses when truncated
+- **Smart Code Completion**: Completes unclosed code blocks
+- **Redundancy Removal**: Removes repeated content from continuations
+
+#### ⚡ Multi-Pass Generation (Optional)
+- **Draft → Refine → Validate**: Improves output quality through iteration
+- **Focus Areas**: Refine for clarity, code quality, error handling
+- **Quality Validation**: Checks for completeness before returning
+
+### Configuration
+
+Enable orchestration in your VS Code settings (`settings.json`):
+
+```json
+{
+  "azureGpt.enableOrchestration": true,
+  "azureGpt.maxFileContextTokens": 8000,
+  "azureGpt.enableMemoryRetrieval": true
+}
+```
+
+Or via VS Code UI:
+1. Open Settings (`Cmd/Ctrl + ,`)
+2. Search for "KBot" or "azureGpt"
+3. Toggle "Enable Orchestration: true"
+
+### When to Use Orchestration
+
+Enable orchestration when:
+- Working with large codebases (10K+ lines)
+- Having long conversations (20+ messages)
+- Getting truncated responses
+- Need relevant context from past conversations
+- Working with models having smaller context windows
+
+Disable orchestration when:
+- Need fastest possible responses
+- Working with small files
+- Short conversations
+- Limited API quota
+
+### Performance Impact
+
+| Feature | Overhead | When Used |
+|---------|----------|-----------|
+| Context Check | ~5ms | Every request |
+| Chunking | 10-50ms | Large files only |
+| Summarization | +1 API call | Context exceeds limit |
+| Memory Retrieval | ~5-20ms | Every request (if enabled) |
+| Multi-Pass | +N API calls | Optional, disabled by default |
+| Continuation | +M API calls | Truncated responses only |
 
 ## Installation
 
@@ -192,6 +273,95 @@ Configure a custom workspace directory:
 | `KBot: Manage File Exclusions` | Manage excluded file patterns |
 | `KBot: Configure System Prompts` | Customize AI behavior |
 | `KBot: Configure Workspace Directory` | Set custom workspace path |
+| `KBot: Configure GitHub` | Set up GitHub integration for PR reviews |
+| `KBot: Detect GitHub Repository` | Auto-detect GitHub repo from git config |
+| `KBot: Run AI Code Review` | Run automated code review on current changes |
+| `KBot: Manage Review Configurations` | Manage custom review rules |
+| `KBot: Clear Review Annotations` | Clear review decorations from editor |
+
+## AI Code Review
+
+KBot now includes AI-powered code review with GitHub integration!
+
+### Features
+
+- **Automated Code Review**: AI analyzes your git changes for bugs, security issues, and quality problems
+- **Inline Annotations**: Review comments appear directly in your editor with severity indicators
+- **Quick Actions**: Apply or reject suggestions with one click
+- **GitHub Integration**: Create PR status checks and review comments
+- **Custom Rules**: Define review criteria in `.kbot/checks/*.md` files
+- **Severity Levels**: error, warning, suggestion, info
+
+### Running a Code Review
+
+1. Make changes to your code (or open a repository with uncommitted changes)
+2. Run `KBot: Run AI Code Review` from Command Palette
+3. Wait for AI to analyze changes
+4. Review annotations in your editor
+5. Click on suggestions to:
+   - **Apply** - Apply the suggested change
+   - **Reject** - Dismiss the suggestion
+
+### GitHub Integration
+
+Set up GitHub for PR reviews:
+
+1. Run `KBot: Configure GitHub`
+2. Enter your GitHub Personal Access Token
+3. Run `KBot: Detect GitHub Repository` (optional)
+4. When reviewing code, status checks will be posted to GitHub
+
+**Token Permissions**: Your token needs `repo` and `pull_request` scopes.
+
+### Custom Review Rules
+
+Create custom review rules for your repository:
+
+1. Create `.kbot/checks/` directory in your repository
+2. Add markdown files with review rules (e.g., `security.md`, `code-quality.md`)
+3. Each rule follows this format:
+
+```markdown
+# Review Name
+
+## Rules
+
+1. **Rule Name**
+   - Description of what to check
+   - Suggestions for how to fix
+
+2. **Another Rule**
+   - Description of what to check
+   - Suggestions for how to fix
+```
+
+Default rules are automatically created:
+- `security.md` - Security vulnerability checks
+- `code-quality.md` - Code quality and maintainability checks
+- `performance.md` - Performance optimization checks
+
+### Managing Review Configs
+
+1. Run `KBot: Manage Review Configurations`
+2. Select a configuration to view, edit, or delete
+3. Rules are read from `.kbot/checks/*.md` files
+
+### Configuration
+
+Enable custom review rules in VS Code settings:
+
+```json
+{
+  "kbot.codeReview.useCustomConfig": true,
+  "kbot.codeReview.reviewAllFiles": false,
+  "kbot.codeReview.includeContext": 3
+}
+```
+
+**Settings**:
+- `useCustomConfig`: Use rules from `.kbot/checks/*.md` files
+- `reviewAllFiles`: Review all files vs. only staged changes
+- `includeContext`: Lines of context to include in review comments
 
 ## Features in Detail
 
@@ -284,7 +454,7 @@ Make sure your API deployment supports streaming (most do).
 - **VS Code**: 1.75.0 and higher
 - **Platforms**: Windows, macOS, Linux
 - **Providers**:
-  - Azure OpenAI: GPT-4, GPT-4o, GPT-4-turbo, GPT-3.5-Turbo
+  - Azure OpenAI: **GPT-5, GPT-5.1, GPT-5.2** (1M token context), GPT-4, GPT-4o, GPT-4-turbo, GPT-3.5-Turbo
   - NVIDIA: Nemotron, LLMs hosted on NVIDIA endpoints
   - Anthropic Foundry: Claude models on Azure
   - Z.AI: GLM-4.7, GLM-4-Plus, and other GLM models
@@ -310,7 +480,19 @@ kbot/
 │   ├── exclusionManager.ts           # File exclusion patterns
 │   ├── credentialsView.ts            # Credentials UI (webview)
 │   ├── chatHistoryView.ts            # History UI (webview)
-│   └── logger.ts                     # Logging utilities
+│   ├── logger.ts                     # Logging utilities
+│   ├── githubService.ts              # GitHub API integration
+│   ├── reviewConfigManager.ts        # Review configuration management
+│   └── core/
+│       ├── codeReviewService.ts       # Code review orchestration
+│       ├── orchestrationService.ts    # Main orchestrator
+│       ├── contextManager.ts         # Model limits & token estimation
+│       ├── chunker.ts                # Smart text chunking
+│       ├── summarizer.ts             # Hierarchical summarization
+│       ├── memoryStore.ts            # Semantic memory with embeddings
+│       ├── retrieval.ts              # RAG-style context retrieval
+│       ├── multiPassEngine.ts        # Multi-pass refinement
+│       └── continuationHandler.ts    # Output continuation
 ├── resources/
 │   └── icon.svg                      # Extension icon
 ├── package.json                      # Extension manifest
@@ -508,6 +690,89 @@ MIT License - See LICENSE file for details
 ---
 
 ## Changelog
+
+### 1.9.0 (2025-03-17)
+
+**🚀 NEW: AI Code Review Features**
+- Added automated code review powered by AI
+- Inline editor decorations showing review annotations
+- Apply/Reject suggestions with quick actions
+- Severity levels: error, warning, suggestion, info
+
+**🔗 NEW: GitHub Integration**
+- GitHub token management in credentials panel
+- Auto-detect GitHub repository from git config
+- Create PR status checks (success/failure/pending)
+- Post review comments to pull requests
+- Test GitHub connection with one click
+
+**⚙️ NEW: Custom Review Rules**
+- Per-repository review configuration in `.kbot/checks/*.md`
+- Default templates: security.md, code-quality.md, performance.md
+- Manage review configs via Command Palette
+- Enable/disable custom rules in settings
+
+**New Commands:**
+- `KBot: Configure GitHub` - Set up GitHub credentials
+- `KBot: Detect GitHub Repository` - Auto-detect repo
+- `KBot: Run AI Code Review` - Run review on current changes
+- `KBot: Manage Review Configurations` - Manage custom rules
+- `KBot: Clear Review Annotations` - Clear decorations
+
+**New Settings:**
+- `kbot.codeReview.useCustomConfig` - Use .kbot/checks rules
+- `kbot.codeReview.reviewAllFiles` - Review all vs. staged changes
+- `kbot.codeReview.includeContext` - Lines of context in comments
+
+**Technical Details:**
+- New service: `GitHubService` for API integration
+- New service: `CodeReviewService` for review orchestration
+- New service: `ReviewConfigManager` for config management
+- Added `@octokit/rest` dependency for GitHub API
+- Uses existing AI providers (Azure/NVIDIA/Anthropic/Zai)
+- Structured review results with JSON parsing
+
+### 1.8.1 (2025-02-22)
+
+**FIX: Session Switch Error**
+- Fixed "command 'azureGPTChatView.focus' not found" error when switching chat sessions
+- Updated to use correct view ID `kbotChatView.focus`
+- Added error handling for focus command failures
+
+### 1.8.0 (2025-02-22)
+
+**🚀 NEW: Intelligent Orchestration Layer**
+- Added comprehensive context orchestration for Cursor-level intelligence
+- **Context Window Manager**: Model-specific token tracking and safety buffers
+- **Smart Chunking**: Structure-aware code splitting that preserves functions/classes
+- **Hierarchical Summarization**: Recursive content compression with key point preservation
+- **Semantic Memory Store**: RAG-style retrieval using embedding-based search
+- **Output Continuation**: Automatic extension of truncated responses
+- **Multi-Pass Generation**: Draft → Refine → Validate workflow (optional)
+
+**Configuration:**
+- Add `"azureGpt.enableOrchestration": true` to settings
+- Configure max file context tokens
+- Toggle memory retrieval on/off
+
+**Benefits:**
+- Handle files larger than model context windows
+- Retrieve relevant context from conversation history
+- Generate outputs longer than max_tokens limit
+- Scale intelligently across different models
+
+**Architecture:**
+```
+src/core/
+├── contextManager.ts      # Model limits & token estimation
+├── chunker.ts             # Smart text chunking
+├── summarizer.ts          # Hierarchical summarization
+├── memoryStore.ts         # Semantic memory with embeddings
+├── retrieval.ts           # RAG-style context retrieval
+├── multiPassEngine.ts     # Multi-pass refinement
+├── continuationHandler.ts # Output continuation
+└── orchestrationService.ts # Main orchestrator
+```
 
 ### 1.6.8 (2025-02-13)
 

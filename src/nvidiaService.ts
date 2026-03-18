@@ -225,4 +225,13 @@ export class NvidiaService {
         this.credentials = null;
         Logger.log('NVIDIA credentials cleared');
     }
+
+    /**
+     * Refresh credentials from storage
+     */
+    async refreshCredentials(): Promise<void> {
+        Logger.log('Refreshing NVIDIA credentials...');
+        this.credentials = null;
+        await this.ensureCredentials();
+    }
 }

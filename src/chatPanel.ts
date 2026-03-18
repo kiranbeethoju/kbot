@@ -20,6 +20,7 @@ import { ChatHistoryManager, ChatSession } from './chatHistory';
 import { TerminalManager } from './terminalManager';
 import { ChatMessage, ProviderType } from './types';
 import { Logger } from './logger';
+import { OrchestrationService, AIProvider } from './core/orchestrationService';
 
 export interface ChatMessageEntry {
     id: string;
@@ -41,6 +42,7 @@ export class ChatPanelProvider implements vscode.WebviewViewProvider {
     private abortController: AbortController | null = null;
     private structuredEditManager?: StructuredEditManager;
     private previewOriginalContent?: Map<string, string>;  // Store original content for preview revert
+    private orchestrationServices: Map<ProviderType, OrchestrationService> = new Map();
 
     constructor(
         private extensionUri: vscode.Uri,
@@ -90,6 +92,69 @@ export class ChatPanelProvider implements vscode.WebviewViewProvider {
         } else {
             this.currentSession = await this.chatHistoryManager.createSession();
         }
+    }
+
+    /**
+     * Get orchestration service for a provider
+     */
+    private getOrchestrationService(provider: ProviderType, modelName?: string): OrchestrationService {
+        if (this.orchestrationServices.has(provider)) {
+            return this.orchestrationServices.get(provider)!;
+        }
+
+        // Create AI provider adapter for orchestration
+        const aiProvider: AIProvider = {
+            chatCompletion: async (messages, onProgress, signal) => {
+                switch (provider) {
+                    case ProviderType.Azure:
+                        return this.azureGPTService.chatCompletion(messages, onProgress, signal);
+                    case ProviderType.NVIDIA:
+                        return this.nvidiaService.sendMessage(messages, onProgress);
+                    case ProviderType.AnthropicFoundry:
+                        return this.anthropicFoundryService.sendMessage(messages, onProgress);
+                    case ProviderType.Zai:
+                        return this.zaiService.sendMessage(messages, onProgress);
+                    default:
+                        throw new Error(`Unknown provider: ${provider}`);
+                }
+            }
+        };
+
+        const service = new OrchestrationService(aiProvider);
+        this.orchestrationServices.set(provider, service);
+        return service;
+    }
+
+    /**
+     * Refresh all credentials and clear service cache
+     * Call this when credentials are updated to ensure services use the latest values
+     */
+    public async refreshCredentials(): Promise<void> {
+        Logger.log('Refreshing all credentials...');
+
+        // Clear orchestration services cache to force recreation with new credentials
+        this.orchestrationServices.clear();
+
+        // Refresh credentials in all services
+        try {
+            await this.azureGPTService.refreshCredentials();
+            await this.nvidiaService.refreshCredentials();
+            await this.anthropicFoundryService.refreshCredentials();
+            await this.zaiService.refreshCredentials();
+            Logger.log('✓ All credentials refreshed successfully');
+        } catch (error: any) {
+            const errorMsg = error ? error.message || error.toString() : 'Unknown error';
+            Logger.warn(`✗ Error refreshing some credentials: ${errorMsg}`);
+        }
+    }
+
+    /**
+     * Check if orchestration is enabled for current provider
+     */
+    private async isOrchestrationEnabled(): Promise<boolean> {
+        // Check configuration setting
+        const config = vscode.workspace.getConfiguration('azureGpt');
+        return config.get<boolean>('enableOrchestration', false);
     }
 
     /**
@@ -406,7 +471,7 @@ export class ChatPanelProvider implements vscode.WebviewViewProvider {
                     systemPrompt = await this.credentialManager.getSystemPrompt();
             }
 
-            const messages: ChatMessage[] = [
+            let messages: ChatMessage[] = [
                 {
                     role: 'system',
                     content: systemPrompt
@@ -441,6 +506,117 @@ ${gitDiffContent}${terminalContent}
                 }
             }
 
+            // Check if orchestration is enabled
+            const orchestrationEnabled = await this.isOrchestrationEnabled();
+            let orchestrationResult: any = null;
+
+            Logger.log(`🤖 Orchestration Status: ${orchestrationEnabled ? 'ENABLED' : 'DISABLED'}`);
+
+            if (orchestrationEnabled) {
+                this.sendMessage({
+                    type: 'loadingUpdate',
+                    message: 'Processing with intelligent orchestration...'
+                });
+
+                try {
+                    // Build context string from messages
+                    let contextStr = messages
+                        .filter(m => m.role === 'system' || m.role === 'user')
+                        .map(m => `${m.role}: ${m.content}`)
+                        .join('\n\n');
+
+                    // Get model name for orchestration
+                    let modelName = 'gpt-4o';
+                    if (provider === ProviderType.Azure) {
+                        const azureCreds = await this.credentialManager.getAzureCredentials();
+                        modelName = azureCreds?.modelName || 'gpt-4o';
+                    }
+
+                    // Get file paths for context
+                    const filePaths = fileContexts.map((f: any) => f.path || f.filePath).filter(Boolean);
+
+                    Logger.log(`📦 Orchestration Configuration:`);
+                    Logger.log(`   - Model: ${modelName}`);
+                    Logger.log(`   - Files in context: ${filePaths.length}`);
+                    Logger.log(`   - Context size: ${Math.ceil(contextStr.length / 4)} estimated tokens`);
+                    Logger.log(`   - Features: Chunking ✓, Summarization ✓, Memory ✓, Retrieval ✓, Continuation ✓`);
+
+                    // Run orchestration
+                    const orchestrationService = this.getOrchestrationService(provider, modelName);
+                    orchestrationResult = await orchestrationService.intelligentGenerate(
+                        userMessage,
+                        contextStr,
+                        {
+                            modelName,
+                            enableChunking: true,
+                            enableSummarization: true,
+                            enableMemory: true,
+                            enableRetrieval: true,
+                            enableMultiPass: false, // Disabled for speed
+                            enableContinuation: true,
+                            fileContext: filePaths
+                        }
+                    );
+
+                    // Log orchestration metadata
+                    Logger.log(`✅ Orchestration Complete:`);
+                    Logger.log(`   - Input tokens: ${orchestrationResult.metadata.originalTokens}`);
+                    Logger.log(`   - Output tokens: ${orchestrationResult.metadata.finalTokens}`);
+                    Logger.log(`   - Compression: ${(orchestrationResult.metadata.originalTokens / orchestrationResult.metadata.finalTokens).toFixed(2)}x`);
+                    Logger.log(`   - Processing steps: ${orchestrationResult.metadata.processingSteps.length}`);
+
+                    // Log each processing step
+                    orchestrationResult.metadata.processingSteps.forEach((step: any, index: number) => {
+                        Logger.log(`   Step ${index + 1}: ${step.step}`);
+                        Logger.log(`      - ${step.description}`);
+                        Logger.log(`      - Tokens: ${step.tokensIn} → ${step.tokensOut}`);
+                        Logger.log(`      - Duration: ${step.duration}ms`);
+
+                        // Log additional details for specific steps
+                        if (step.step === 'summarization' && step.result) {
+                            const s = step.result;
+                            Logger.log(`      - Levels: ${s.levels}, Compression: ${s.compressionRatio.toFixed(2)}x`);
+                        }
+                        if (step.step === 'retrieval' && step.result) {
+                            const r = step.result;
+                            Logger.log(`      - Memories retrieved: ${r.sources.length}`);
+                            r.sources.forEach((src: any) => {
+                                Logger.log(`         * ${src.type} (relevance: ${src.relevance.toFixed(2)})`);
+                            });
+                        }
+                    });
+
+                    // Update messages with processed prompt
+                    const processedPrompt = orchestrationResult.content;
+                    messages = [
+                        { role: 'system', content: systemPrompt },
+                        {
+                            role: 'user',
+                            content: processedPrompt,
+                            ...(image && {
+                                image: {
+                                    data: image.data,
+                                    mimeType: image.mimeType
+                                }
+                            })
+                        }
+                    ];
+
+                    this.sendMessage({
+                        type: 'loadingUpdate',
+                        message: `Orchestration complete (${orchestrationResult.metadata.processingSteps.length} steps)...`
+                    });
+                } catch (error: any) {
+                    Logger.error('❌ Orchestration failed, falling back to standard processing:', error);
+                    this.sendMessage({
+                        type: 'loadingUpdate',
+                        message: 'Using standard processing...'
+                    });
+                }
+            } else {
+                Logger.log(`ℹ️  Standard processing (orchestration disabled)`);
+            }
+
             // Calculate input tokens (rough estimation: 1 token ≈ 4 characters)
             let totalInputChars = 0;
             for (const msg of messages) {
@@ -459,7 +635,10 @@ ${gitDiffContent}${terminalContent}
                 const azureCreds = await this.credentialManager.getAzureCredentials();
                 if (azureCreds?.modelName) {
                     // Adjust context window based on model
-                    if (azureCreds.modelName.includes('gpt-4')) {
+                    if (azureCreds.modelName.includes('gpt-5')) {
+                        contextWindow = 1000000; // 1M tokens for GPT-5
+                        Logger.log(`🚀 Using GPT-5 with 1M token context window`);
+                    } else if (azureCreds.modelName.includes('gpt-4')) {
                         contextWindow = 128000;
                     } else if (azureCreds.modelName.includes('gpt-3.5')) {
                         contextWindow = 16000;
@@ -1011,6 +1190,12 @@ ${gitDiffContent}${terminalContent}
                         `Applied ${result.applied} edit(s) to ${file.path}`
                     );
 
+                    // Notify webview that change was applied
+                    this.sendMessage({
+                        type: 'changeApplied',
+                        filePath: file.path
+                    });
+
                     // Commit to git
                     if (this.gitManager) {
                         const gitChanges: GitChange[] = [];
@@ -1035,6 +1220,12 @@ ${gitDiffContent}${terminalContent}
 
                 // Apply change
                 await this.fileManager.applyFileChanges([file]);
+
+                // Notify webview that change was applied
+                this.sendMessage({
+                    type: 'changeApplied',
+                    filePath: file.path
+                });
 
                 // Commit to git
                 if (this.gitManager) {
@@ -1121,7 +1312,34 @@ ${gitDiffContent}${terminalContent}
                     new vscode.Position(endLineNumber, 0)
                 );
 
-                edit.replace(uri, range, lineEdit.newContent);
+                // Get the current text to detect line ending style
+                const currentText = doc.getText(range);
+
+                // Prepare new content with proper line endings
+                let newContent = lineEdit.newContent;
+
+                // Detect the line ending style used in the file
+                const lineEndingMatch = currentText.match(/\r?\n|\r/);
+                const fileLineEnding = lineEndingMatch?.[0] || '\n';
+
+                // Normalize line endings in new content to match the file
+                if (newContent.includes('\r\n')) {
+                    newContent = newContent.replace(/\r\n/g, fileLineEnding);
+                } else if (newContent.includes('\n')) {
+                    newContent = newContent.replace(/\n/g, fileLineEnding);
+                }
+
+                // Ensure the new content has proper line ending at the end
+                const rangeEndsWithLineEnding = /\r?\n|\r/.test(currentText.slice(-2));
+
+                if (rangeEndsWithLineEnding && !newContent.endsWith(fileLineEnding)) {
+                    newContent = newContent + fileLineEnding;
+                } else if (!rangeEndsWithLineEnding && newContent.endsWith(fileLineEnding)) {
+                    // Remove trailing line ending if the original didn't have one
+                    newContent = newContent.slice(0, -fileLineEnding.length);
+                }
+
+                edit.replace(uri, range, newContent);
             }
 
             await vscode.workspace.applyEdit(edit);
@@ -1162,21 +1380,30 @@ ${gitDiffContent}${terminalContent}
                     await vscode.workspace.fs.delete(uri);
                     Logger.log(`Deleted new file: ${filePath}`);
                     vscode.window.showInformationMessage(`Reverted: Deleted new file ${filePath}`);
+
+                    // Close the editor tab if open
+                    const doc = vscode.workspace.textDocuments.find(d => d.uri.fsPath === fullPath);
+                    if (doc) {
+                        await vscode.commands.executeCommand('workbench.action.closeActiveEditor');
+                    }
                 } catch (error: any) {
                     vscode.window.showWarningMessage(`Could not delete ${filePath}: ${error.message}`);
                 }
             } else {
-                // Restore original content
-                const encoder = new TextEncoder();
-                await vscode.workspace.fs.writeFile(uri, encoder.encode(originalContent));
+                // Restore original content in the editor without saving to disk
+                const doc = await vscode.workspace.openTextDocument(uri);
+                const edit = new vscode.WorkspaceEdit();
 
-                // Reload the document if it's open
-                const doc = vscode.workspace.textDocuments.find(d => d.uri.fsPath === fullPath);
-                if (doc) {
-                    await vscode.commands.executeCommand('workbench.action.files.revert');
-                }
+                // Replace entire document content
+                const fullRange = new vscode.Range(
+                    new vscode.Position(0, 0),
+                    new vscode.Position(doc.lineCount, 0)
+                );
 
-                vscode.window.showInformationMessage(`Reverted changes to ${filePath}`);
+                edit.replace(uri, fullRange, originalContent);
+                await vscode.workspace.applyEdit(edit);
+
+                vscode.window.showInformationMessage(`Reverted preview changes to ${filePath}`);
             }
 
             this.previewOriginalContent.delete(filePath);
@@ -2803,6 +3030,8 @@ function addFileChanges(files, userMessage) {
     files.forEach((file, index) => {
         const fileDiv = document.createElement('div');
         fileDiv.className = 'file-change ' + file.action;
+        // Add unique ID based on file path for easy reference later
+        fileDiv.id = 'file-change-' + encodeURIComponent(file.path);
 
         const badgeLabels = {
             'create': 'NEW',
@@ -2845,6 +3074,7 @@ function addFileChanges(files, userMessage) {
         // Accept button
         const acceptBtn = document.createElement('button');
         acceptBtn.textContent = 'Accept';
+        acceptBtn.id = 'accept-btn-' + encodeURIComponent(file.path);
         acceptBtn.onclick = () => {
             acceptSingleChange(file.path, file.action);
         };
@@ -3134,6 +3364,11 @@ function addMessage(message) {
                 case 'clearChat':
                     chatContainer.innerHTML = '';
                     break;
+                case 'sessionChanged':
+                    // Clear chat and load new session
+                    chatContainer.innerHTML = '';
+                    console.log('Session changed to:', message.session?.id);
+                    break;
                 case 'messageAdded':
                     addMessage(message.message);
                     break;
@@ -3210,6 +3445,41 @@ function addMessage(message) {
                         content: 'Changes applied successfully!',
                         timestamp: Date.now()
                     });
+                    // Clear currentFiles and disable all accept buttons
+                    currentFiles = [];
+                    document.querySelectorAll('.accept-all-button').forEach(btn => {
+                        btn.textContent = 'All Applied';
+                        btn.disabled = true;
+                    });
+                    document.querySelectorAll('[id^="accept-btn-"]').forEach(btn => {
+                        btn.textContent = 'Applied';
+                        btn.disabled = true;
+                    });
+                    break;
+                case 'changeApplied':
+                    // Mark single file change as applied
+                    const filePath = message.filePath;
+                    const fileId = 'file-change-' + encodeURIComponent(filePath);
+                    const acceptBtnId = 'accept-btn-' + encodeURIComponent(filePath);
+
+                    // Find and update the accept button
+                    const acceptBtn = document.getElementById(acceptBtnId);
+                    if (acceptBtn) {
+                        acceptBtn.textContent = 'Applied';
+                        acceptBtn.disabled = true;
+                    }
+
+                    // Remove file from currentFiles to prevent re-application
+                    currentFiles = currentFiles.filter(f => f.path !== filePath);
+
+                    // If all files are applied, disable accept all button
+                    if (currentFiles.length === 0) {
+                        const acceptAllBtn = document.querySelector('.accept-all-button');
+                        if (acceptAllBtn) {
+                            acceptAllBtn.textContent = 'All Applied';
+                            acceptAllBtn.disabled = true;
+                        }
+                    }
                     break;
                 case 'requestStopped':
                     // Request was cancelled by user

@@ -89,10 +89,15 @@ export class ChatHistoryViewProvider implements vscode.WebviewViewProvider {
     private async switchSession(sessionId: string): Promise<void> {
         try {
             await this.chatHistoryManager.setActiveSession(sessionId);
-            
-            // Focus the chat view
-            await vscode.commands.executeCommand('azureGPTChatView.focus');
-            
+
+            // Focus the chat view - show the sidebar with kbotChatView
+            try {
+                await vscode.commands.executeCommand('kbotChatView.focus');
+            } catch {
+                // Focus command may not exist, that's okay
+                Logger.debug('Could not focus chat view');
+            }
+
             this.sendMessage({
                 type: 'sessionSwitched',
                 sessionId
@@ -164,10 +169,15 @@ export class ChatHistoryViewProvider implements vscode.WebviewViewProvider {
         try {
             await this.chatHistoryManager.createSession();
             await this.loadSessions();
-            
-            // Focus the chat view
-            await vscode.commands.executeCommand('azureGPTChatView.focus');
-            
+
+            // Focus the chat view - show the sidebar with kbotChatView
+            try {
+                await vscode.commands.executeCommand('kbotChatView.focus');
+            } catch {
+                // Focus command may not exist, that's okay
+                Logger.debug('Could not focus chat view');
+            }
+
             this.sendMessage({
                 type: 'newSessionCreated'
             });

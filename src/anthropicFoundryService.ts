@@ -192,4 +192,18 @@ export class AnthropicFoundryService {
 
         return this.sendMessage(messagesWithContext, onProgress);
     }
+
+    /**
+     * Refresh credentials from storage
+     */
+    async refreshCredentials(): Promise<void> {
+        Logger.log('Refreshing Anthropic Foundry credentials...');
+        const credentials = await this.credentialManager.getAnthropicFoundryCredentials();
+        if (credentials) {
+            this.credentials = credentials;
+            Logger.log('Anthropic Foundry credentials refreshed successfully');
+        } else {
+            Logger.warn('No Anthropic Foundry credentials found in storage');
+        }
+    }
 }

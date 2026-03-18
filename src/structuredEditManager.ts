@@ -132,23 +132,36 @@ export class StructuredEditManager {
                 // Get text to delete (for verification)
                 const textToDelete = document.getText(range);
 
-                // Ensure new content ends with newline if replacing a single line
-                // and the old content had a newline
+                // Prepare new content with proper line endings and indentation preservation
                 let newContent = lineEdit.newContent;
-                if (lineEdit.endLine === lineEdit.startLine && textToDelete.endsWith('\n')) {
-                    // We're replacing a single line that had a newline
-                    // Check if new content already has newline
-                    if (!newContent.endsWith('\n')) {
-                        // Preserve the original line ending style (\n vs \r\n vs \r)
-                        const lineEnding = textToDelete.match(/\r?\n|\r/)?.[0] || '\n';
-                        newContent = newContent + lineEnding;
-                    }
+
+                // Detect the line ending style used in the file
+                const lineEndingMatch = textToDelete.match(/\r?\n|\r/);
+                const fileLineEnding = lineEndingMatch?.[0] || '\n';
+
+                // Normalize line endings in new content to match the file
+                if (newContent.includes('\r\n')) {
+                    newContent = newContent.replace(/\r\n/g, fileLineEnding);
+                } else if (newContent.includes('\n')) {
+                    newContent = newContent.replace(/\n/g, fileLineEnding);
+                }
+
+                // Ensure the new content has proper line ending at the end
+                // Check if the original range ended with a line ending
+                const rangeEndsWithLineEnding = /\r?\n|\r/.test(textToDelete.slice(-2));
+
+                if (rangeEndsWithLineEnding && !newContent.endsWith(fileLineEnding)) {
+                    newContent = newContent + fileLineEnding;
+                } else if (!rangeEndsWithLineEnding && newContent.endsWith(fileLineEnding)) {
+                    // Remove trailing line ending if the original didn't have one
+                    newContent = newContent.slice(0, -fileLineEnding.length);
                 }
 
                 Logger.log(`=== Applying Edit ===`);
                 Logger.log(`  Line range: ${lineEdit.startLine} to ${endLineNumber}`);
                 Logger.log(`  Text to delete: "${textToDelete}"`);
                 Logger.log(`  New content: "${newContent}"`);
+                Logger.log(`  Line ending style: "${fileLineEnding}"`);
 
                 edit.replace(uri, range, newContent);
             }
@@ -457,12 +470,33 @@ Use ONE of these formats:
  remaining context
 \`\`\`
 
+## CRITICAL: INDENTATION AND FORMATTING
+
+### PRESERVE EXACT INDENTATION
+✅ Match the EXACT indentation style of the file you're editing
+✅ Use the SAME indentation (tabs vs spaces, number of spaces)
+✅ Match the indentation level of the surrounding code
+✅ Preserve trailing whitespace and line endings
+
+### HOW TO PRESERVE INDENTATION
+1. Look at the indentation of the line you're replacing
+2. Count the leading whitespace characters (tabs or spaces)
+3. Apply the SAME indentation to your new content
+4. If adding nested code, increase indentation by the file's indent size
+
+Example: If the file uses 4 spaces and you're replacing a line with 8 spaces of indent, your new content MUST also start with 8 spaces (or more for nested content).
+
+### LINE ENDINGS
+- Preserve the original line ending style (\\n for Unix/Linux/Mac, \\r\\n for Windows)
+- The system will automatically normalize line endings to match the file
+
 ## WHY STRUCTURED EDITS?
 
 ❌ Don't regenerate entire files - it loses context, breaks formatting, makes diffs unreadable
+❌ Don't guess indentation - ALWAYS match the file's existing style
 ✅ Use line-level edits - precise, readable, safe
 ✅ Edit only what needs to change
-✅ Preserve imports, comments, formatting
+✅ Preserve imports, comments, formatting, indentation
 
 ## EXAMPLE
 
@@ -502,6 +536,6 @@ ${context.currentFile ? `Current file: ${context.currentFile}` : ''}
 
 User request: ${context.userQuery}
 
-Remember: Use structured edits for cleaner, more maintainable code changes!`;
+Remember: Use structured edits for cleaner, more maintainable code changes! ALWAYS preserve the exact indentation and formatting of the original file!`;
     }
 }

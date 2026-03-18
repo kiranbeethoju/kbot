@@ -46,6 +46,15 @@ export class AzureGPTService {
     }
 
     /**
+     * Refresh credentials from storage
+     */
+    async refreshCredentials(): Promise<void> {
+        Logger.log('Refreshing Azure credentials...');
+        this.credentials = null;
+        await this.ensureCredentials();
+    }
+
+    /**
      * Send chat completion request to Azure OpenAI
      */
     async chatCompletion(

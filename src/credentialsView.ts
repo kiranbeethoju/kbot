@@ -8,6 +8,12 @@ import { CredentialManager } from './credentials';
 import { Logger } from './logger';
 import { ProviderType, NvidiaCredentials } from './types';
 import { WorkspaceManager } from './workspaceManager';
+import { AzureGPTService } from './azureGPT';
+import { NvidiaService } from './nvidiaService';
+import { AnthropicFoundryService } from './anthropicFoundryService';
+import { ZaiService } from './zaiService';
+import { ChatPanelProvider } from './chatPanel';
+import { GitHubService } from './githubService';
 
 export class CredentialsViewProvider implements vscode.WebviewViewProvider {
     private view?: vscode.WebviewView;
@@ -15,7 +21,13 @@ export class CredentialsViewProvider implements vscode.WebviewViewProvider {
     constructor(
         private extensionUri: vscode.Uri,
         private credentialManager: CredentialManager,
-        private workspaceManager?: WorkspaceManager
+        private workspaceManager?: WorkspaceManager,
+        private azureGPTService?: AzureGPTService,
+        private nvidiaService?: NvidiaService,
+        private anthropicFoundryService?: AnthropicFoundryService,
+        private zaiService?: ZaiService,
+        private chatPanelProvider?: ChatPanelProvider,
+        private githubService?: GitHubService
     ) {}
 
     public resolveWebviewView(
@@ -83,6 +95,18 @@ export class CredentialsViewProvider implements vscode.WebviewViewProvider {
                 case 'saveZaiCredentials':
                     await this.saveZaiCredentials(data.credentials);
                     break;
+                case 'saveGitHubCredentials':
+                    await this.saveGitHubCredentials(data.credentials);
+                    break;
+                case 'testGitHubCredentials':
+                    await this.testGitHubCredentials();
+                    break;
+                case 'clearGitHubCredentials':
+                    await this.clearGitHubCredentials();
+                    break;
+                case 'detectGitHubRepo':
+                    await this.detectGitHubRepo();
+                    break;
             }
         });
 
@@ -92,6 +116,100 @@ export class CredentialsViewProvider implements vscode.WebviewViewProvider {
                 this.loadState();
             }
         });
+    }
+
+    /**
+     * Refresh all credentials after updates
+     * This ensures services use the latest credentials
+     */
+    private async refreshAllCredentials(): Promise<void> {
+        Logger.log('Refreshing all credentials after update...');
+
+        try {
+            // Refresh individual services if available
+            if (this.azureGPTService) {
+                await this.azureGPTService.refreshCredentials();
+            }
+            if (this.nvidiaService) {
+                await this.nvidiaService.refreshCredentials();
+            }
+            if (this.anthropicFoundryService) {
+                await this.anthropicFoundryService.refreshCredentials();
+            }
+            if (this.zaiService) {
+                await this.zaiService.refreshCredentials();
+            }
+
+            // Also refresh via chat panel provider (clears orchestration cache)
+            if (this.chatPanelProvider) {
+                await this.chatPanelProvider.refreshCredentials();
+            }
+
+            Logger.log('✓ All credentials refreshed successfully');
+        } catch (error: any) {
+            const errorMsg = error ? error.message || error.toString() : 'Unknown error';
+            Logger.warn(`✗ Error refreshing credentials: ${errorMsg}`);
+        }
+    }
+
+    /**
+     * Test credentials by sending a simple message
+     */
+    private async testCredentials(provider: ProviderType): Promise<boolean> {
+        Logger.log(`Testing ${provider} credentials...`);
+
+        try {
+            const testMessage = 'hi';
+            let response: string;
+
+            switch (provider) {
+                case ProviderType.Azure:
+                    if (this.azureGPTService) {
+                        response = await this.azureGPTService.chatCompletion([
+                            { role: 'user', content: testMessage }
+                        ]);
+                    } else {
+                        return false;
+                    }
+                    break;
+                case ProviderType.NVIDIA:
+                    if (this.nvidiaService) {
+                        response = await this.nvidiaService.chatCompletion([
+                            { role: 'user', content: testMessage }
+                        ]);
+                    } else {
+                        return false;
+                    }
+                    break;
+                case ProviderType.AnthropicFoundry:
+                    if (this.anthropicFoundryService) {
+                        response = await this.anthropicFoundryService.sendMessage([
+                            { role: 'user', content: testMessage }
+                        ]);
+                    } else {
+                        return false;
+                    }
+                    break;
+                case ProviderType.Zai:
+                    if (this.zaiService) {
+                        response = await this.zaiService.sendMessage([
+                            { role: 'user', content: testMessage }
+                        ]);
+                    } else {
+                        return false;
+                    }
+                    break;
+                default:
+                    return false;
+            }
+
+            Logger.log(`✓ Credentials test successful! Response: "${response.substring(0, 50)}${response.length > 50 ? '...' : ''}"`);
+            return true;
+        } catch (error: any) {
+            const errorMsg = error ? error.message || error.toString() : 'Unknown error';
+            Logger.error(`✗ Credentials test failed: ${errorMsg}`);
+            return false;
+        }
     }
 
     /**
@@ -228,6 +346,8 @@ export class CredentialsViewProvider implements vscode.WebviewViewProvider {
         const selectedNvidiaModel = await this.credentialManager.getSelectedNvidiaModel();
         const anthropicCreds = await this.credentialManager.getAnthropicFoundryCredentials();
         const zaiCreds = await this.credentialManager.getZaiCredentials();
+        const githubToken = this.githubService ? await this.githubService.getToken() : null;
+        const githubRepo = this.githubService ? this.githubService.getRepository() : null;
 
         // Mask NVIDIA API keys for security
         const maskedNvidiaCreds = nvidiaCreds.map(cred => ({
@@ -252,7 +372,8 @@ export class CredentialsViewProvider implements vscode.WebviewViewProvider {
                 zai: zaiCreds ? {
                     ...zaiCreds,
                     apiKey: zaiCreds.apiKey ? '••••••••' : ''
-                } : null
+                } : null,
+                github: githubToken ? { token: githubToken, repository: githubRepo } : null
             }
         });
 
@@ -266,7 +387,8 @@ export class CredentialsViewProvider implements vscode.WebviewViewProvider {
     private async switchProvider(provider: ProviderType): Promise<void> {
         await this.credentialManager.setSelectedProvider(provider);
         Logger.log(`Provider switched to: ${provider}`);
-        vscode.window.showInformationMessage(`Switched to ${provider === ProviderType.Azure ? 'Azure OpenAI' : 'NVIDIA'} provider`);
+        vscode.window.showInformationMessage(`Switched to ${provider === ProviderType.Azure ? 'Azure OpenAI' : provider === ProviderType.NVIDIA ? 'NVIDIA' : provider === ProviderType.AnthropicFoundry ? 'Anthropic Foundry' : 'Z.AI'} provider`);
+        await this.refreshAllCredentials();
         await this.loadState();
     }
 
@@ -308,6 +430,14 @@ export class CredentialsViewProvider implements vscode.WebviewViewProvider {
             });
 
             vscode.window.showInformationMessage('Azure credentials saved successfully!');
+            await this.refreshAllCredentials();
+
+            // Test credentials with a simple message
+            const testPassed = await this.testCredentials(ProviderType.Azure);
+            if (!testPassed) {
+                vscode.window.showWarningMessage('Credentials saved but test failed. Please check your credentials.');
+            }
+
             await this.loadState();
         } catch (error: any) {
             Logger.error('Failed to save Azure credentials', error);
@@ -373,6 +503,14 @@ export class CredentialsViewProvider implements vscode.WebviewViewProvider {
             });
 
             vscode.window.showInformationMessage('NVIDIA credentials saved successfully!');
+            await this.refreshAllCredentials();
+
+            // Test credentials with a simple message
+            const testPassed = await this.testCredentials(ProviderType.NVIDIA);
+            if (!testPassed) {
+                vscode.window.showWarningMessage('Credentials saved but test failed. Please check your credentials.');
+            }
+
             await this.loadState();
         } catch (error: any) {
             Logger.error('Failed to save NVIDIA credentials', error);
@@ -393,6 +531,7 @@ export class CredentialsViewProvider implements vscode.WebviewViewProvider {
         await this.credentialManager.setSelectedNvidiaModel(modelName);
         Logger.log(`Selected NVIDIA model: ${modelName}`);
         vscode.window.showInformationMessage(`Selected NVIDIA model: ${modelName}`);
+        await this.refreshAllCredentials();
         await this.loadState();
     }
 
@@ -412,6 +551,7 @@ export class CredentialsViewProvider implements vscode.WebviewViewProvider {
             await this.credentialManager.configureNvidiaCredentials(updated);
             Logger.log(`Deleted NVIDIA model: ${modelName}`);
             vscode.window.showInformationMessage(`Deleted NVIDIA model: ${modelName}`);
+            await this.refreshAllCredentials();
             await this.loadState();
         }
     }
@@ -520,6 +660,14 @@ export class CredentialsViewProvider implements vscode.WebviewViewProvider {
             });
 
             vscode.window.showInformationMessage('Anthropic Foundry credentials saved successfully!');
+            await this.refreshAllCredentials();
+
+            // Test credentials with a simple message
+            const testPassed = await this.testCredentials(ProviderType.AnthropicFoundry);
+            if (!testPassed) {
+                vscode.window.showWarningMessage('Credentials saved but test failed. Please check your credentials.');
+            }
+
             await this.loadState();
         } catch (error: any) {
             Logger.error('Failed to save Anthropic Foundry credentials', error);
@@ -568,6 +716,14 @@ export class CredentialsViewProvider implements vscode.WebviewViewProvider {
             });
 
             vscode.window.showInformationMessage('Z.AI credentials saved successfully!');
+            await this.refreshAllCredentials();
+
+            // Test credentials with a simple message
+            const testPassed = await this.testCredentials(ProviderType.Zai);
+            if (!testPassed) {
+                vscode.window.showWarningMessage('Credentials saved but test failed. Please check your credentials.');
+            }
+
             await this.loadState();
         } catch (error: any) {
             Logger.error('Failed to save Z.AI credentials', error);
@@ -578,6 +734,116 @@ export class CredentialsViewProvider implements vscode.WebviewViewProvider {
                 provider: 'zai'
             });
             vscode.window.showErrorMessage(`Failed to save credentials: ${error.message}`);
+        }
+    }
+
+    /**
+     * Save GitHub credentials
+     */
+    private async saveGitHubCredentials(creds: any): Promise<void> {
+        if (!this.githubService) {
+            return;
+        }
+
+        try {
+            Logger.log('Saving GitHub credentials from webview...');
+            await this.githubService.saveCredentials(creds.token);
+            this.sendMessage({
+                type: 'credentialsSaved',
+                success: true,
+                provider: 'github'
+            });
+            vscode.window.showInformationMessage('GitHub credentials saved successfully!');
+
+            // Test credentials
+            const testPassed = await this.githubService.testCredentials();
+            if (!testPassed) {
+                vscode.window.showWarningMessage('Credentials saved but authentication failed. Please check your token.');
+            }
+
+            await this.loadState();
+            // Also detect repository after saving credentials
+            await this.detectGitHubRepo();
+        } catch (error: any) {
+            Logger.error('Failed to save GitHub credentials', error);
+            this.sendMessage({
+                type: 'credentialsSaved',
+                success: false,
+                error: error.message,
+                provider: 'github'
+            });
+            vscode.window.showErrorMessage(`Failed to save credentials: ${error.message}`);
+        }
+    }
+
+    /**
+     * Test GitHub credentials
+     */
+    private async testGitHubCredentials(): Promise<void> {
+        if (!this.githubService) {
+            return;
+        }
+
+        const testPassed = await this.githubService.testCredentials();
+        if (testPassed) {
+            vscode.window.showInformationMessage('GitHub authentication successful!');
+            this.sendMessage({
+                type: 'githubTestResult',
+                success: true
+            });
+        } else {
+            vscode.window.showErrorMessage('GitHub authentication failed. Please check your token.');
+            this.sendMessage({
+                type: 'githubTestResult',
+                success: false
+            });
+        }
+    }
+
+    /**
+     * Clear GitHub credentials
+     */
+    private async clearGitHubCredentials(): Promise<void> {
+        if (!this.githubService) {
+            return;
+        }
+
+        const confirmed = await vscode.window.showWarningMessage(
+            'Are you sure you want to clear GitHub credentials?',
+            'Yes',
+            'No'
+        );
+
+        if (confirmed === 'Yes') {
+            try {
+                await this.githubService.clearCredentials();
+                await this.loadState();
+            } catch (error: any) {
+                vscode.window.showErrorMessage(`Failed to clear credentials: ${error.message}`);
+            }
+        }
+    }
+
+    /**
+     * Detect GitHub repository
+     */
+    private async detectGitHubRepo(): Promise<void> {
+        if (!this.githubService) {
+            return;
+        }
+
+        try {
+            const repo = await this.githubService.detectRepository();
+            this.sendMessage({
+                type: 'githubRepoDetected',
+                repository: repo
+            });
+        } catch (error: any) {
+            Logger.warn('Failed to detect GitHub repository', error);
+            this.sendMessage({
+                type: 'githubRepoDetected',
+                repository: null
+            });
         }
     }
 
@@ -887,6 +1153,7 @@ export class CredentialsViewProvider implements vscode.WebviewViewProvider {
         <button id="nvidiaProviderBtn" class="provider-button">NVIDIA (Local)</button>
         <button id="anthropicProviderBtn" class="provider-button">Anthropic Foundry</button>
         <button id="zaiProviderBtn" class="provider-button">Z.AI (GLM)</button>
+        <button id="githubProviderBtn" class="provider-button">GitHub</button>
     </div>
 
     <div id="status" class="status not-configured">
@@ -1077,6 +1344,30 @@ export class CredentialsViewProvider implements vscode.WebviewViewProvider {
         </div>
     </div>
 
+    <!-- GitHub Credentials Form -->
+    <div id="githubForm" class="hidden">
+        <div id="githubRepoInfo" class="workspace-info hidden">
+            <div class="workspace-info-label">DETECTED REPOSITORY</div>
+            <div class="workspace-info-path" id="githubRepoPath">Loading...</div>
+        </div>
+
+        <div class="form-group">
+            <label for="githubToken">Personal Access Token</label>
+            <input type="password" id="githubToken" placeholder="ghp_...">
+            <div class="input-hint">GitHub Personal Access Token with repo and pr permissions</div>
+        </div>
+
+        <div class="button-group">
+            <button id="saveGitHubButton">Save GitHub Credentials</button>
+            <button id="testGitHubButton" class="secondary">Test Connection</button>
+            <button id="clearGitHubButton" class="secondary" style="color: var(--vscode-errorForeground);">Clear</button>
+        </div>
+
+        <div class="button-group" style="margin-top: 12px;">
+            <button id="detectGitHubRepoButton" class="secondary">Detect Repository</button>
+        </div>
+    </div>
+
     <div style="border-top: 1px solid var(--vscode-panel-border); padding-top: 16px; margin-top: 16px;">
         <h3 style="font-size: 14px; margin-bottom: 12px;">System Prompt Editor</h3>
         <p style="font-size: 12px; color: var(--vscode-descriptionForeground); margin-bottom: 12px;">Customize the system prompt used for AI interactions. Use placeholders: {fileCount}, {includeGitDiff}, {includeTerminal}</p>
@@ -1133,6 +1424,10 @@ export class CredentialsViewProvider implements vscode.WebviewViewProvider {
 
         document.getElementById('zaiProviderBtn').addEventListener('click', () => {
             switchProvider('zai');
+        });
+
+        document.getElementById('githubProviderBtn').addEventListener('click', () => {
+            switchProvider('github');
         });
 
         function switchProvider(provider) {
@@ -1340,6 +1635,40 @@ export class CredentialsViewProvider implements vscode.WebviewViewProvider {
             });
         });
 
+        // Save GitHub credentials
+        document.getElementById('saveGitHubButton').addEventListener('click', () => {
+            const token = document.getElementById('githubToken').value.trim();
+            if (!token) {
+                alert('Personal Access Token is required');
+                return;
+            }
+
+            vscode.postMessage({
+                type: 'saveGitHubCredentials',
+                credentials: { token }
+            });
+
+            // Clear the token field for security
+            document.getElementById('githubToken').value = '';
+        });
+
+        // Test GitHub credentials
+        document.getElementById('testGitHubButton').addEventListener('click', () => {
+            vscode.postMessage({ type: 'testGitHubCredentials' });
+        });
+
+        // Clear GitHub credentials
+        document.getElementById('clearGitHubButton').addEventListener('click', () => {
+            if (confirm('Are you sure you want to clear GitHub credentials?')) {
+                vscode.postMessage({ type: 'clearGitHubCredentials' });
+            }
+        });
+
+        // Detect GitHub repository
+        document.getElementById('detectGitHubRepoButton').addEventListener('click', () => {
+            vscode.postMessage({ type: 'detectGitHubRepo' });
+        });
+
         // View logs
         document.getElementById('logsButton').addEventListener('click', () => {
             vscode.postMessage({ type: 'openLogs' });
@@ -1401,8 +1730,11 @@ export class CredentialsViewProvider implements vscode.WebviewViewProvider {
                     break;
                 case 'credentialsSaved':
                     if (message.success) {
-                        // Clear Azure API key input for security
+                        // Clear API key inputs for security
                         document.getElementById('azureApiKey').value = '••••••••';
+                        if (message.provider === 'github') {
+                            document.getElementById('githubToken').value = '••••••••';
+                        }
                     }
                     break;
                 case 'systemPromptLoaded':
@@ -1415,6 +1747,16 @@ export class CredentialsViewProvider implements vscode.WebviewViewProvider {
                         alert('Failed to save system prompt: ' + message.error);
                     }
                     break;
+                case 'githubTestResult':
+                    if (message.success) {
+                        alert('GitHub authentication successful!');
+                    } else {
+                        alert('GitHub authentication failed. Please check your token.');
+                    }
+                    break;
+                case 'githubRepoDetected':
+                    renderGitHubRepo(message.repository);
+                    break;
             }
         });
 
@@ -1424,6 +1766,7 @@ export class CredentialsViewProvider implements vscode.WebviewViewProvider {
             document.getElementById('nvidiaProviderBtn').classList.toggle('active', currentState.provider === 'nvidia');
             document.getElementById('anthropicProviderBtn').classList.toggle('active', currentState.provider === 'anthropic-foundry');
             document.getElementById('zaiProviderBtn').classList.toggle('active', currentState.provider === 'zai');
+            document.getElementById('githubProviderBtn').classList.toggle('active', currentState.provider === 'github');
 
             // Update status
             const statusEl = document.getElementById('status');
@@ -1433,12 +1776,17 @@ export class CredentialsViewProvider implements vscode.WebviewViewProvider {
                 ? currentState.nvidia.length > 0
                 : currentState.provider === 'anthropic-foundry'
                 ? currentState.anthropic !== null
-                : currentState.zai !== null;
+                : currentState.provider === 'zai'
+                ? currentState.zai !== null
+                : currentState.provider === 'github'
+                ? currentState.github !== null
+                : false;
 
             if (isConfigured) {
                 const providerName = currentState.provider === 'azure' ? 'Azure' :
                                    currentState.provider === 'nvidia' ? currentState.nvidia.length + ' NVIDIA Model(s)' :
-                                   currentState.provider === 'anthropic-foundry' ? 'Anthropic Foundry' : 'Z.AI';
+                                   currentState.provider === 'anthropic-foundry' ? 'Anthropic Foundry' :
+                                   currentState.provider === 'zai' ? 'Z.AI' : 'GitHub';
                 statusEl.textContent = '✓ ' + providerName + ' Configured';
                 statusEl.className = 'status configured';
             } else {
@@ -1451,6 +1799,7 @@ export class CredentialsViewProvider implements vscode.WebviewViewProvider {
             document.getElementById('nvidiaForm').classList.toggle('hidden', currentState.provider !== 'nvidia');
             document.getElementById('anthropicForm').classList.toggle('hidden', currentState.provider !== 'anthropic-foundry');
             document.getElementById('zaiForm').classList.toggle('hidden', currentState.provider !== 'zai');
+            document.getElementById('githubForm').classList.toggle('hidden', currentState.provider !== 'github');
 
             // Populate Azure form
             if (currentState.azure) {
@@ -1489,8 +1838,28 @@ export class CredentialsViewProvider implements vscode.WebviewViewProvider {
                 document.getElementById('zaiApiKey').disabled = true;
             }
 
+            // Populate GitHub form
+            if (currentState.github) {
+                document.getElementById('githubToken').value = currentState.github.token || '';
+                renderGitHubRepo(currentState.github.repository);
+            }
+
             // Render NVIDIA models list
             renderNvidiaModels();
+        }
+
+        function renderGitHubRepo(repository) {
+            const repoInfo = document.getElementById('githubRepoInfo');
+            const repoPath = document.getElementById('githubRepoPath');
+
+            if (repository) {
+                repoInfo.classList.remove('hidden');
+                const repoString = repository.owner + '/' + repository.repo;
+                repoPath.textContent = repoString;
+            } else {
+                repoInfo.classList.add('hidden');
+                repoPath.textContent = 'Not detected';
+            }
         }
 
         function renderNvidiaModels() {

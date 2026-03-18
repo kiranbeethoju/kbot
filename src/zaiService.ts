@@ -143,4 +143,18 @@ export class ZaiService {
 
         return this.sendMessage(messagesWithContext, onProgress);
     }
+
+    /**
+     * Refresh credentials from storage
+     */
+    async refreshCredentials(): Promise<void> {
+        Logger.log('Refreshing Z.AI credentials...');
+        const credentials = await this.credentialManager.getZaiCredentials();
+        if (credentials) {
+            this.credentials = credentials;
+            Logger.log('Z.AI credentials refreshed successfully');
+        } else {
+            Logger.warn('No Z.AI credentials found in storage');
+        }
+    }
 }

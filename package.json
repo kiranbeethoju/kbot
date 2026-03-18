@@ -1,8 +1,8 @@
 {
   "name": "kbot",
   "displayName": "KBot",
-  "description": "Cursor-like AI coding assistant powered by Azure OpenAI, NVIDIA, Anthropic Foundry, and Z.AI. 100% local - no telemetry, no cloud storage. Your code never leaves your machine except for AI provider API calls.",
-  "version": "1.6.8",
+  "description": "Cursor-like AI coding assistant powered by Azure OpenAI (GPT-5, GPT-4, GPT-4o), NVIDIA, Anthropic Foundry, and Z.AI. 100% local - no telemetry, no cloud storage. Your code never leaves your machine except for AI provider API calls. Now with intelligent orchestration layer for handling large codebases and long conversations.",
+  "version": "1.9.0",
   "publisher": "KiranBeethojuAIplugins",
   "author": "Kiran Beethoju",
   "license": "MIT",
@@ -63,6 +63,31 @@
         "command": "kbot.configureWorkspace",
         "title": "Configure Workspace Directory",
         "category": "KBot"
+      },
+      {
+        "command": "kbot.configureGitHub",
+        "title": "Configure GitHub",
+        "category": "KBot"
+      },
+      {
+        "command": "kbot.detectGitHubRepo",
+        "title": "Detect GitHub Repository",
+        "category": "KBot"
+      },
+      {
+        "command": "kbot.runCodeReview",
+        "title": "Run AI Code Review",
+        "category": "KBot"
+      },
+      {
+        "command": "kbot.manageReviewConfigs",
+        "title": "Manage Review Configurations",
+        "category": "KBot"
+      },
+      {
+        "command": "kbot.clearReviewDecorations",
+        "title": "Clear Review Annotations",
+        "category": "KBot"
       }
     ],
     "viewsContainers": {
@@ -95,12 +120,47 @@
           "contextualTitle": "KBot Chat History"
         }
       ]
+    },
+    "configuration": {
+      "title": "KBot",
+      "properties": {
+        "azureGpt.enableOrchestration": {
+          "type": "boolean",
+          "default": false,
+          "description": "Enable intelligent orchestration layer with context management, summarization, and memory retrieval for improved handling of large files and long conversations."
+        },
+        "azureGpt.maxFileContextTokens": {
+          "type": "number",
+          "default": 8000,
+          "description": "Maximum tokens to use for file context before triggering summarization."
+        },
+        "azureGpt.enableMemoryRetrieval": {
+          "type": "boolean",
+          "default": true,
+          "description": "Enable semantic memory retrieval for relevant context from previous conversations."
+        },
+        "kbot.codeReview.useCustomConfig": {
+          "type": "boolean",
+          "default": false,
+          "description": "Use custom review rules from .kbot/checks/*.md files."
+        },
+        "kbot.codeReview.reviewAllFiles": {
+          "type": "boolean",
+          "default": false,
+          "description": "Review all files in the repository (vs. only staged changes)."
+        },
+        "kbot.codeReview.includeContext": {
+          "type": "number",
+          "default": 3,
+          "description": "Number of lines of context to include in review comments."
+        }
+      }
     }
   },
   "scripts": {
     "vscode:prepublish": "npm run compile",
-    "compile": "esbuild src/extension.ts --bundle --outfile=out/extension.js --external:vscode --format=cjs --platform=node",
-    "watch": "esbuild src/extension.ts --bundle --outfile=out/extension.js --external:vscode --format=cjs --platform=node --watch",
+    "compile": "esbuild src/extension.ts --bundle --outfile=out/extension.js --external:vscode --external:@octokit/rest --format=cjs --platform=node",
+    "watch": "esbuild src/extension.ts --bundle --outfile=out/extension.js --external:vscode --external:@octokit/rest --format=cjs --platform=node --watch",
     "package": "vsce package"
   },
   "repository": {
@@ -111,6 +171,9 @@
     "url": "https://github.com/kiranbeethoju/kbot/issues"
   },
   "homepage": "https://github.com/kiranbeethoju/kbot#readme",
+  "dependencies": {
+    "@octokit/rest": "^21.0.0"
+  },
   "devDependencies": {
     "@types/node": "^20.0.0",
     "@types/vscode": "^1.75.0",
